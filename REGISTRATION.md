@@ -10,8 +10,8 @@ answers below cover every field these forms typically ask. Paste as you go.)
   & Computer Science, expected Dec 2027)
 - **Country / location:** United States (Los Angeles / San Diego, CA)
 - **GitHub:** github.com/Ace2932
-- **Team name:** "Aiden Fox" (solo) — or pick a handle; team-size rules unstated, entering as
-  an individual. If it asks team size: **1**.
+- **Team name:** **Fennec** (solo; team-size rules unstated, entering as an individual).
+  If it asks team size: **1**.
 - **Role:** Sole developer (autonomy + software).
 
 ## Track interest (if asked)
@@ -20,10 +20,10 @@ answers below cover every field these forms typically ask. Paste as you go.)
 
 ## Background / experience (paste-ready)
 > I'm a USC Computer Engineering & CS senior (Dec 2027) who builds autonomous robots
-> end-to-end. My main project, NOVA, is an autonomous quadruped: 200 Hz Cortex-M7 motor
-> firmware, a from-scratch servo-bus driver, a custom KiCad power board with INA226 rail
-> telemetry, and ROS2 + LiDAR SLAM on a Jetson. I currently intern at Motif (AI-agents
-> platform). For this challenge I'm running a GPS-waypoint follower against the Remote
+> end-to-end. My main project, Fennec, is an autonomous quadruped (built on the open-source
+> Nova-SM3 platform, heavily redesigned): 200 Hz Cortex-M7 motor firmware, a from-scratch
+> servo-bus driver, a custom KiCad power board with INA226 rail telemetry, and ROS2 + LiDAR
+> SLAM on a Jetson. I currently intern at Motif (AI-agents platform). For this challenge I'm running a GPS-waypoint follower against the Remote
 > Access SDK (bearing controller over /data + /control), then layering camera-based
 > sidewalk-keeping trained on the FrodoBots-2K / Berkeley-FrodoBots-7K datasets.
 
