@@ -61,9 +61,9 @@ backend is already self-consistent, so tune the *control gains* (`KP_ANG`, `CRUI
 `ALIGN_DEG`) in sim, then calibrate *heading* on the bot.
 
 ## Roadmap (post-baseline)
-- **Perception for Urban:** stay-on-sidewalk / obstacle-stop from `front_frame` (the
-  FrodoBots-2K + Berkeley-FrodoBots-7K datasets are labeled driving data — train or
-  fine-tune a lane/keepout policy).
+- **Perception for Urban → `vision/` (built, see `vision/README.md`):** behavior-cloning
+  sidewalk-keeping policy fused with the GPS follower. Pipeline proven on a synthetic task
+  (val_mse ~1e-4); swap in real FrodoBots data (needs HF access) to make it competitive.
 - **Recovery:** intervention API + stuck-detection (no GPS progress → back off / re-plan).
 - **Off-road / Indoor:** image-goal policy (no GPS) — bigger lift, reuse the control loop.
 - Log frames to `frames/` for offline eval; add a small dashboard.
