@@ -13,9 +13,13 @@ Then: SDK_BASE_URL=http://localhost:8777 python3 waypoint_follower.py
 import base64
 import json
 import math
+import os
+import random
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+FAIL_RATE = float(os.getenv("FAKE_FAIL_RATE", "0"))   # prob of a transient 503 per request
 
 START = (37.8719, -122.2585, 0.0)   # near UC Berkeley
 MAX_SPEED = 1.5                     # m/s at linear=1
@@ -56,7 +60,15 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _maybe_fail(self):
+        if FAIL_RATE and random.random() < FAIL_RATE:
+            self._send({"detail": "transient error"}, 503)
+            return True
+        return False
+
     def do_GET(self):
+        if self._maybe_fail():
+            return
         p = self.path.split("?")[0]
         if p == "/data":
             o = int(state["heading"] % 360 / 360 * 255)   # 0..255, like the real bot
@@ -72,6 +84,8 @@ class H(BaseHTTPRequestHandler):
             self._send({"detail": "not found"}, 404)
 
     def do_POST(self):
+        if self._maybe_fail():
+            return
         p = self.path.split("?")[0]
         ln = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(ln) if ln else b"{}"

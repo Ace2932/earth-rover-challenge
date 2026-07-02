@@ -11,9 +11,10 @@ which maps directly onto standard robot nav.
 ## What's here
 | File | Role |
 |---|---|
-| `rover_client.py` | Thin HTTP wrapper over the SDK's local server (`/data`, `/v2/front`, `/control`, Missions API). |
+| `rover_client.py` | Resilient HTTP wrapper (session + retry/backoff) over the SDK's local server. |
 | `geo.py` | Haversine distance + initial-bearing + angle-wrap (0=N, 90=E). |
-| `waypoint_follower.py` | Proportional bearing controller. `--mock` sim (no hardware) or live. |
+| `waypoint_follower.py` | Bearing controller + GPS-course heading fusion, safety-stop, stuck detection, server-authoritative checkpoints, run logging, optional `--vision`. |
+| `tests/` | `pytest` unit tests for geometry + control law + heading fusion. |
 | `fake_sdk_server.py` | Stdlib fake SDK server — run the REAL HTTP client end-to-end, no bot. |
 | `calibrate_heading.py` | Recover the bot's `orientation`→degrees mapping (run once per bot). |
 | `CALL_DAY_RUNBOOK.md` | Exact live bring-up steps for the onboarding call. |
@@ -33,7 +34,20 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python fake_sdk_server.py 8777 &
 SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py
 ```
-Both end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON
+Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
+
+### Built for a real 4G rover
+- **Safety-stop always:** the control loop is wrapped in `try/finally` — any crash, `Ctrl-C`,
+  or exception still sends `control(0,0)`. The rover never runs away on an error.
+- **Request resilience:** `RoverClient` retries with backoff (verified surviving a 60%
+  injected fault rate); on total failure the loop stops the rover rather than driving blind.
+- **Heading fusion:** uses GPS course-over-ground when moving (drift-free, no calibration)
+  and the magnetometer only when too slow — so a bad `orientation` calibration can't ruin a run.
+- **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
+- **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
+- **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
+
+Both quick-start commands end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON
 shapes, and the orientation→heading pipeline — verified against the SDK's actual `main.py`.
 
 ## Live (after registration + a bot/allocation)
