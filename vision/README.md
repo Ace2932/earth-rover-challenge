@@ -27,13 +27,20 @@ fitting it validates the architecture, training, inference, and fusion. It's a w
 > steering depends on (mean-prediction, sign-acc stuck at 0.5).
 
 ## Unlock real data (you own the HF steps)
-### Option A — Berkeley-FrodoBots-7K (recommended: LeRobot format, reannotated labels)
-1. Accept terms: https://huggingface.co/datasets/frodobots/Berkeley-FrodoBots-7K (gated).
-2. `.venv/bin/huggingface-cli login` (or `export HF_TOKEN=...`).
-3. `PYTHONPATH=vision .venv/bin/python inspect_dataset.py` — confirm the `action` shape.
-4. Use `action_mbra` (Model-Based Reannotation — cleaner). It's a **nav action** (waypoint
-   chunk / velocity), so set `action_dim` to match and convert the first waypoint→heading
-   into `angular` for the rover (atan2 of the relative waypoint), or use its yaw directly.
+### Option A — Berkeley-FrodoBots-7K (recommended: reannotated MBRA labels)
+Repo is now **`BitRobot/Berkeley-FrodoBots-7K`** (gated). It is a **Zarr store split across 24
+`tar.gz` parts, ~769 GB** (~1 TB peak extracted) — NOT tabular; streaming yields raw zarr
+chunks. So this is a **cloud/big-disk job**, not a laptop one.
+1. Accept terms in the browser + `hf auth login` (done ✓ for Aiden).
+2. On a box with ~1 TB disk + GPU: `bash vision/download_berkeley.sh ./berkeley7k`
+   (downloads the 24 parts, `cat`s them, extracts the zarr).
+3. `python3 vision/inspect_zarr.py ./berkeley7k/frodobots_dataset/dataset_cache.zarr`
+   — prints the real array shapes (`action`, `action_mbra`, image arrays/paths).
+4. Write the Dataset against those shapes: yield `(front frame, action_mbra[i])`, set
+   `SidewalkPolicy(action_dim=<last dim of action_mbra>)`. `action_mbra` is a nav action
+   (waypoint chunk / velocity) — convert its first waypoint→heading to `angular` for the
+   rover (`atan2` of the relative waypoint), or use its yaw. The MBRA paper's `frodo-vla`
+   repo is the canonical reference loader.
 
 ### Option B — FrodoBots-2K (raw teleop, maps 1:1 to /control)
 - `huggingface_hub.snapshot_download` a few ride ids (front MP4 20fps 1024×576 + 10 Hz

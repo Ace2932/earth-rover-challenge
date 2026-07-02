@@ -3,7 +3,7 @@ No full download — streaming=True pulls only what we read."""
 import sys
 from datasets import load_dataset
 
-REPO = "frodobots/Berkeley-FrodoBots-7K"
+REPO = "BitRobot/Berkeley-FrodoBots-7K"
 try:
     ds = load_dataset(REPO, split="train", streaming=True)
 except Exception as e:

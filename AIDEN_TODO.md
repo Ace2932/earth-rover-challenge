@@ -3,23 +3,18 @@
 Ordered by clock. Code side is done + tested; these are the things that need your
 accounts, hardware, or a human at the keyboard.
 
-## 🔴 Now — unlock the real dataset (2 browser steps + 1 terminal)
-The gated dataset is **`BitRobot/Berkeley-FrodoBots-7K`** (webdataset, 769 GB, reannotated
-MBRA labels). I opened its page in Chrome.
-1. **Sign in** to Hugging Face (top-right of that tab).
-2. Click **"Agree and access repository"** (shares your email/username with the authors —
-   that's why it has to be you).
-3. Create a **read token** at https://huggingface.co/settings/tokens, then in a terminal:
-   ```bash
-   cd ~/codebases/earth-rover-challenge
-   ! .venv/bin/huggingface-cli login       # paste the token when prompted
-   ```
-   (the `!` runs it in this Claude session so I can verify access right after.)
-Then tell me — I'll stream a real sample, confirm the `action_mbra` shape, and wire the
-real data loader + retrain the sidewalk policy on actual driving data.
+## ✅ Dataset access — DONE (Berkeley-7K gate accepted + HF login confirmed)
+The real data (**`BitRobot/Berkeley-FrodoBots-7K`**) turned out to be a **Zarr store split
+across 24 tar.gz parts, ~769 GB** — reannotated MBRA nav labels. Not streamable as tidy rows;
+it must be downloaded + reconstructed. **So real-data training is a cloud/big-disk job, not a
+laptop one.** The synthetic-trained policy is your working baseline until then.
 
-> Alt if you'd rather not gate: FrodoBots-2K raw is public but needs manual ride downloads +
-> MP4/CSV parsing (see `vision/README.md`). Berkeley-7K is the better path.
+## 🔴 Real-data training (when you want the competitive vision policy) — needs a cloud box
+On a rented GPU box with ~1 TB disk:
+1. `bash vision/download_berkeley.sh ./berkeley7k`  (24 parts → cat → extract zarr)
+2. `python3 vision/inspect_zarr.py ./berkeley7k/.../dataset_cache.zarr`  (prints real shapes)
+3. Send me the shapes → I write the exact Dataset + retrain resnet18 on `action_mbra`.
+> Cheaper alt: FrodoBots-2K raw rides (public, MP4/CSV) for a smaller pretrain — `vision/README.md`.
 
 ## 🟠 Tue 2026-07-07, 6:00 PM — onboarding call
 Ask the 3 questions (in `CALL_DAY_RUNBOOK.md`): testing-allocation booking, SDK token/bot
