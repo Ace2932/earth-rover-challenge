@@ -14,14 +14,27 @@ which maps directly onto standard robot nav.
 | `rover_client.py` | Thin HTTP wrapper over the SDK's local server (`/data`, `/v2/front`, `/control`, Missions API). |
 | `geo.py` | Haversine distance + initial-bearing + angle-wrap (0=N, 90=E). |
 | `waypoint_follower.py` | Proportional bearing controller. `--mock` sim (no hardware) or live. |
+| `fake_sdk_server.py` | Stdlib fake SDK server — run the REAL HTTP client end-to-end, no bot. |
+| `calibrate_heading.py` | Recover the bot's `orientation`→degrees mapping (run once per bot). |
+| `CALL_DAY_RUNBOOK.md` | Exact live bring-up steps for the onboarding call. |
 | `.env.example` | SDK + tuning config. |
 
-## Quick start — sim (no hardware, works right now)
+## Setup
 ```bash
-pip3 install -r requirements.txt
-python3 waypoint_follower.py --mock      # drives a synthetic 3-waypoint route, prints convergence
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
-Expected: each waypoint reported "reached", ending `COMPLETE — 3/3 waypoints`.
+
+## Quick start — works right now, no hardware
+```bash
+# A) pure sim (in-process kinematics)
+.venv/bin/python waypoint_follower.py --mock
+
+# B) full HTTP path against a fake SDK server (proves the live client/server integration)
+.venv/bin/python fake_sdk_server.py 8777 &
+SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py
+```
+Both end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON
+shapes, and the orientation→heading pipeline — verified against the SDK's actual `main.py`.
 
 ## Live (after registration + a bot/allocation)
 1. Activate a bot (or claim challenge testing allocation) → SDK token at
