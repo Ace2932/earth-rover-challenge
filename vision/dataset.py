@@ -61,6 +61,33 @@ def _ride_id(ride_dir):
     return os.path.basename(ride_dir).split("_")[1]
 
 
+def _front_video(ride_dir, rid):
+    """Path to the front-camera video for a ride, or None.
+
+    Two on-disk formats exist:
+      - getting-started sample: a tidy front_camera_<id>.mp4.
+      - raw dataset parts (output_rides_*.zip): video is HLS under recordings/
+        (*_uid_e_video.m3u8 + .ts segments); the front stream is 1024 wide, the
+        rear 540, so we pick the widest video playlist. cv2/ffmpeg reads .m3u8
+        the same as an .mp4.
+    """
+    import os
+    import glob
+    import cv2
+    mp4 = os.path.join(ride_dir, f"front_camera_{rid}.mp4")
+    if os.path.exists(mp4):
+        return mp4
+    best, best_w = None, 0
+    for m in sorted(glob.glob(os.path.join(ride_dir, "recordings", "*_uid_e_video.m3u8"))):
+        cap = cv2.VideoCapture(m)
+        ok, _ = cap.read()
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if ok else 0
+        cap.release()
+        if w > best_w:
+            best, best_w = m, w
+    return best
+
+
 class FrodoBots2KDataset(Dataset):
     """Real FrodoBots-2K teleop data -> (front frame, [linear, angular]).
 
@@ -95,10 +122,10 @@ class FrodoBots2KDataset(Dataset):
 
         for ride_dir in ride_dirs:
             rid = _ride_id(ride_dir)
-            mp4 = os.path.join(ride_dir, f"front_camera_{rid}.mp4")
+            video = _front_video(ride_dir, rid)
             ctrl_p = os.path.join(ride_dir, f"control_data_{rid}.csv")
             ts_p = os.path.join(ride_dir, f"front_camera_timestamps_{rid}.csv")
-            if not (os.path.exists(mp4) and os.path.exists(ctrl_p) and os.path.exists(ts_p)):
+            if not (video and os.path.exists(ctrl_p) and os.path.exists(ts_p)):
                 continue
 
             ctrl = pd.read_csv(ctrl_p)[["timestamp", "linear", "angular"]] \
@@ -123,7 +150,7 @@ class FrodoBots2KDataset(Dataset):
 
             cache = cache_dir or (ride_dir.rstrip("/") + "_frames")
             os.makedirs(cache, exist_ok=True)
-            cap = cv2.VideoCapture(mp4)
+            cap = cv2.VideoCapture(video)
             idx = 0
             ok, frame = cap.read()
             while ok:
