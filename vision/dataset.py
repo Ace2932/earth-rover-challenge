@@ -44,23 +44,111 @@ class SyntheticSidewalkDataset(Dataset):
         return img, torch.tensor([linear, angular], dtype=torch.float32)
 
 
+def find_ride_dirs(root):
+    """Return sorted ride directories (.../ride_<id>_<ts>/ with a control CSV) under root."""
+    import os
+    out = []
+    for d, _dirs, files in os.walk(root):
+        if os.path.basename(d).startswith("ride_") \
+                and any(f.startswith("control_data_") for f in files):
+            out.append(d)
+    return sorted(out)
+
+
+def _ride_id(ride_dir):
+    import os
+    # ride_<id>_<timestamp> -> <id>
+    return os.path.basename(ride_dir).split("_")[1]
+
+
 class FrodoBots2KDataset(Dataset):
-    """Real teleop data. Downloads a few ride files from HF, decodes front-cam frames,
-    aligns to the 10 Hz control stream -> (frame, [linear, angular]).
+    """Real FrodoBots-2K teleop data -> (front frame, [linear, angular]).
 
-    Requires: `huggingface-cli login` (rate limits) and torchvision video decode.
-    Left as an explicit loader you run once you've picked ride ids; see vision/README.md.
+    Each ride dir holds control_data_<id>.csv (10 Hz: linear, angular, rpm_1..4,
+    timestamp), front_camera_<id>.mp4 (20 fps, 1024x576) and
+    front_camera_timestamps_<id>.csv (frame_id, timestamp). We align each sampled
+    frame to the nearest control row by timestamp; the target (linear, angular) is
+    already the rover's /control space, so no conversion is needed.
+
+    Frames are decoded once in a single sequential pass per ride and cached as small
+    JPEGs (no fragile per-item random seeking), so epochs after the first are fast.
+
+    ride_dirs: a ride dir, list of ride dirs, or a dataset root (auto-discovered).
     """
-    def __init__(self, ride_files, img_size=64, stride=4):
-        self.samples = []       # list of (mp4_path, frame_idx, action)
+    def __init__(self, ride_dirs, img_size=96, stride=4, cache_dir=None,
+                 drop_idle=True, max_frames_per_ride=None, tolerance=0.2):
         self.img_size = img_size
-        self._build(ride_files, stride)
+        self.samples = []       # list of (jpg_path, action float32[2])
+        self._build(ride_dirs, stride, cache_dir, drop_idle,
+                    max_frames_per_ride, tolerance)
 
-    def _build(self, ride_files, stride):
-        # Intentionally minimal: expects locally-downloaded (front_mp4, control_csv) pairs.
-        # Parse control CSV (10 Hz: timestamp, linear/angular or wheel RPM -> v,omega),
-        # index video frames at `stride`, store (path, frame_idx, action).
-        # Kept as a stub so this module imports without the ~GB downloads; fill in with
-        # your chosen ride ids per vision/README.md ("Unlock real data").
-        raise NotImplementedError(
-            "Download rides then implement CSV<->frame alignment — see vision/README.md")
+    def _build(self, ride_dirs, stride, cache_dir, drop_idle,
+               max_frames_per_ride, tolerance):
+        import os
+        import cv2
+        import numpy as np
+        import pandas as pd
+
+        if isinstance(ride_dirs, str):
+            found = find_ride_dirs(ride_dirs)
+            ride_dirs = found if found else [ride_dirs]
+
+        for ride_dir in ride_dirs:
+            rid = _ride_id(ride_dir)
+            mp4 = os.path.join(ride_dir, f"front_camera_{rid}.mp4")
+            ctrl_p = os.path.join(ride_dir, f"control_data_{rid}.csv")
+            ts_p = os.path.join(ride_dir, f"front_camera_timestamps_{rid}.csv")
+            if not (os.path.exists(mp4) and os.path.exists(ctrl_p) and os.path.exists(ts_p)):
+                continue
+
+            ctrl = pd.read_csv(ctrl_p)[["timestamp", "linear", "angular"]] \
+                .sort_values("timestamp").reset_index(drop=True)
+            ts = pd.read_csv(ts_p)[["frame_id", "timestamp"]] \
+                .sort_values("timestamp").reset_index(drop=True)
+            # nearest control row within `tolerance` seconds of each frame
+            merged = pd.merge_asof(ts, ctrl, on="timestamp",
+                                   direction="nearest", tolerance=tolerance) \
+                .dropna(subset=["linear", "angular"])
+            merged = merged.iloc[::stride]
+            if drop_idle:
+                moving = (merged["linear"].abs() > 0.05) | (merged["angular"].abs() > 0.05)
+                merged = merged[moving]
+            if max_frames_per_ride:
+                merged = merged.iloc[:max_frames_per_ride]
+
+            wanted = {int(r.frame_id): (float(r.linear), float(r.angular))
+                      for r in merged.itertuples()}
+            if not wanted:
+                continue
+
+            cache = cache_dir or (ride_dir.rstrip("/") + "_frames")
+            os.makedirs(cache, exist_ok=True)
+            cap = cv2.VideoCapture(mp4)
+            idx = 0
+            ok, frame = cap.read()
+            while ok:
+                if idx in wanted:
+                    jpg = os.path.join(cache, f"{rid}_{idx:06d}_{self.img_size}.jpg")
+                    if not os.path.exists(jpg):
+                        cv2.imwrite(jpg, cv2.resize(frame, (self.img_size, self.img_size)))
+                    lin, ang = wanted[idx]
+                    self.samples.append((jpg, np.array([lin, ang], dtype=np.float32)))
+                idx += 1
+                ok, frame = cap.read()
+            cap.release()
+
+        if not self.samples:
+            raise RuntimeError(
+                "FrodoBots2KDataset: built 0 samples. Check the dataset root has "
+                "ride_<id>/ dirs with control_data + front_camera + timestamps.")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, i):
+        import cv2
+        import torch as _torch
+        jpg, action = self.samples[i]
+        img = cv2.cvtColor(cv2.imread(jpg), cv2.COLOR_BGR2RGB)
+        t = _torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
+        return t, _torch.from_numpy(action)

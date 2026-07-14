@@ -42,18 +42,31 @@ chunks. So this is a **cloud/big-disk job**, not a laptop one.
    rover (`atan2` of the relative waypoint), or use its yaw. The MBRA paper's `frodo-vla`
    repo is the canonical reference loader.
 
-### Option B — FrodoBots-2K (raw teleop, maps 1:1 to /control)
-- `huggingface_hub.snapshot_download` a few ride ids (front MP4 20fps 1024×576 + 10 Hz
-  control CSV). Fill `FrodoBots2KDataset._build`: parse control (linear/angular; derive
-  ω from the 4 wheel RPMs if needed), index frames at a stride, align by timestamp.
-- Target = `(linear, angular)` — already the rover's control space, no conversion.
+### Option B: FrodoBots-2K (raw teleop, maps 1:1 to /control) — IMPLEMENTED
+`FrodoBots2KDataset` in `dataset.py` is done and verified on real rides. Access is via 24
+zip parts listed in `complete-dataset.csv` on S3 (NOT per-ride files):
+- **Quick local check** (~343 MB, a few rides):
+  ```bash
+  curl -o gs.zip https://frodobots-2k-dataset.s3.ap-southeast-1.amazonaws.com/frodobots-dataset-getting-started.zip
+  unzip gs.zip -d data
+  PYTHONPATH=vision python train.py --data data/frodobots-dataset-getting-started \
+    --backbone resnet18 --img 96 --stride 8 --epochs 15 --out sidewalk_frodobots.pt
+  ```
+- **Full run on Colab:** `vision/colab_frodobots.ipynb` downloads one ~19 GB part and trains.
+
+Each ride has `control_data_<id>.csv` (columns `linear, angular, rpm_1..4, timestamp`) and
+`front_camera_timestamps_<id>.csv` (`frame_id, timestamp`). The loader aligns each sampled
+frame to the nearest control row by timestamp; target `(linear, angular)` is already the
+rover's control space (the `rpm_*` wheel columns are there if you want to derive it, but not
+needed). Idle frames are dropped by default; frames are decoded once and cached as JPEGs.
 
 ## Train real → deploy
 ```bash
-# swap SyntheticSidewalkDataset -> your real Dataset in train.py, then:
-PYTHONPATH=vision .venv/bin/python train.py --epochs 30 --backbone resnet18
+# real data is just the --data flag now (no code edit):
+PYTHONPATH=vision python train.py --data <frodobots_root> \
+  --backbone resnet18 --img 96 --stride 6 --epochs 30 --out sidewalk_frodobots.pt
 ```
-Use MPS for a subset now; a cloud GPU (A10/A100) for the full set. Then in the live loop:
+Use MPS for a subset now; a cloud GPU (A10/A100) or Colab for the full set. Then in the live loop:
 ```python
 frame, _ = client.get_front_frame()          # jpeg bytes from /v2/front
 img = preprocess(frame, size=ck["img"])       # decode -> resize -> /255 -> CHW tensor

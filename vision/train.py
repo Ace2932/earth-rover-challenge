@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from policy import SidewalkPolicy
-from dataset import SyntheticSidewalkDataset
+from dataset import SyntheticSidewalkDataset, FrodoBots2KDataset, find_ride_dirs
 
 
 def device():
@@ -45,12 +45,30 @@ def main():
     ap.add_argument("--backbone", default="tiny", choices=["tiny", "resnet18"])
     ap.add_argument("--img", type=int, default=64)
     ap.add_argument("--out", default="vision/sidewalk_policy.pt")
+    ap.add_argument("--data", default=None,
+                    help="FrodoBots-2K root (dir of ride_<id>/). Omit for synthetic.")
+    ap.add_argument("--stride", type=int, default=4,
+                    help="sample every Nth front-camera frame (real data only)")
+    ap.add_argument("--max-rides", type=int, default=None,
+                    help="cap number of rides used from --data (first N)")
     args = ap.parse_args()
 
     dev = device()
     print(f"device={dev} backbone={args.backbone}")
-    train_ds = SyntheticSidewalkDataset(n=4096, img_size=args.img, seed=0)
-    val_ds = SyntheticSidewalkDataset(n=512, img_size=args.img, seed=999)
+    if args.data:
+        rides = find_ride_dirs(args.data) or [args.data]
+        if args.max_rides:
+            rides = rides[:args.max_rides]
+        full = FrodoBots2KDataset(rides, img_size=args.img, stride=args.stride)
+        n_val = max(1, int(0.1 * len(full)))
+        n_train = len(full) - n_val
+        gen = torch.Generator().manual_seed(0)
+        train_ds, val_ds = torch.utils.data.random_split(
+            full, [n_train, n_val], generator=gen)
+        print(f"FrodoBots-2K: {len(full)} samples ({n_train} train / {n_val} val)")
+    else:
+        train_ds = SyntheticSidewalkDataset(n=4096, img_size=args.img, seed=0)
+        val_ds = SyntheticSidewalkDataset(n=512, img_size=args.img, seed=999)
     dl = DataLoader(train_ds, batch_size=128, shuffle=True)
 
     model = SidewalkPolicy(backbone=args.backbone).to(dev)
