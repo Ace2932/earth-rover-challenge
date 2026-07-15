@@ -14,7 +14,8 @@ Run:
   python waypoint_follower.py --mock
   python waypoint_follower.py                      # waypoints from /checkpoints-list
   python waypoint_follower.py --route route.json   # explicit [{latitude,longitude}]
-  python waypoint_follower.py --vision vision/sidewalk_policy.pt   # fuse sidewalk-keeping
+  python waypoint_follower.py --vision                 # fuse the trained sidewalk policy
+  python waypoint_follower.py --vision path/to/model.pt # or a specific checkpoint
 """
 import argparse
 import json
@@ -277,13 +278,24 @@ def _load_vision(ckpt_path):
     return infer
 
 
+DEFAULT_VISION = os.path.join(os.path.dirname(__file__), "vision", "sidewalk_frodobots.pt")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mock", action="store_true", help="kinematic sim, no hardware")
     ap.add_argument("--route", help="JSON list of {latitude,longitude} (live mode)")
-    ap.add_argument("--vision", help="path to a trained sidewalk_policy.pt to fuse")
+    ap.add_argument("--vision", nargs="?", const=DEFAULT_VISION, default=None,
+                    help=f"fuse a trained sidewalk policy; bare --vision loads "
+                         f"{os.path.relpath(DEFAULT_VISION)}, or pass a checkpoint path")
     ap.add_argument("--log", help="write a per-step CSV to this path")
     args = ap.parse_args()
+
+    if args.vision and not os.path.exists(args.vision):
+        print(f"vision checkpoint not found: {args.vision}\n"
+              f"train one (Colab: vision/colab_frodobots.ipynb) or place "
+              f"sidewalk_frodobots.pt in vision/.")
+        return
 
     cfg = Config.from_env()
     io = MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock else LiveIO(cfg)
