@@ -18,6 +18,8 @@ which maps directly onto standard robot nav.
 | `fake_sdk_server.py` | Stdlib fake SDK server — run the REAL HTTP client end-to-end, no bot. |
 | `calibrate_heading.py` | Recover the bot's `orientation`→degrees mapping (run once per bot). |
 | `CALL_DAY_RUNBOOK.md` | Exact live bring-up steps for the onboarding call. |
+| `DEPLOYMENT.md` | Why this belongs on a cloud VM, and how to run it there. |
+| `health.py` | Watches `/data`'s timestamp; restarts the SDK server when Chrome wedges. |
 | `.env.example` | SDK + tuning config. |
 
 ## Setup

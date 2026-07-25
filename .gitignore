@@ -5,3 +5,4 @@ __pycache__/
 frames/
 *.pt
 data/
+logs/
