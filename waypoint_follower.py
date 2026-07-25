@@ -44,6 +44,13 @@ class Config:
     loop_hz: float = 5.0
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
+
+    # --- vision fusion (only used with --vision) ---
+    vision_alpha: float = 0.5          # weight on VISION steering (0 = pure GPS)
+    vision_max_err_deg: float = 30.0   # above this the GPS controller is turning in
+                                       # place; the policy has no useful opinion
+    vision_min_linear: float = 0.25    # a timid BC policy must not pin us to a crawl
+    frame_max_age_s: float = 0.7       # older than this -> do not steer on it
     heading_min_move_m: float = 0.7    # move at least this to trust GPS course
     # magnetometer fallback: heading = SIGN*orientation*SCALE + OFFSET
     heading_scale: float = 360.0 / 255.0
@@ -129,11 +136,12 @@ class LiveIO:
         self.c.control(linear, angular)
 
     def front_frame(self):
+        """Return (jpeg_bytes, timestamp) — the timestamp is how we spot a stalled
+        stream serving the same frame over and over."""
         try:
-            frame, _ = self.c.get_front_frame()
-            return frame
+            return self.c.get_front_frame()
         except Exception:
-            return None
+            return None, None
 
     def waypoints(self, route_file):
         if route_file:
@@ -170,7 +178,7 @@ class MockIO:
         self.lon += de / (111111.0 * math.cos(math.radians(self.lat)))
 
     def front_frame(self):
-        return None
+        return None, None
 
     def waypoints(self, route_file):
         b = (self.lat, self.lon)
@@ -182,8 +190,52 @@ class MockIO:
         return True, {}
 
 
-def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
-    return max(0.0, min(gps_lin, vis_lin)), clamp(alpha * gps_ang + (1 - alpha) * vis_ang, -1, 1)
+def frame_is_fresh(timestamp, now, cfg):
+    """Is this camera frame recent enough to steer on?
+
+    `/v2/front` serves "the latest emitted frame" from a ~500 ms WebRTC stream. If
+    the stream stalls it keeps serving the same frame, and steering on a scene that
+    no longer exists is worse than not steering at all. No timestamp -> we cannot
+    tell, so allow it rather than disabling vision outright.
+    """
+    if timestamp is None:
+        return True
+    try:
+        ts = float(timestamp)
+    except (TypeError, ValueError):
+        return True
+    if ts > 1e11:               # milliseconds, not seconds
+        ts /= 1000.0
+    return (now - ts) <= cfg.frame_max_age_s
+
+
+def fuse_gate(err_deg, confidence, cfg):
+    """How much to trust vision right now, 0..1.
+
+    Zero while the GPS controller is turning in place: at a large heading error the
+    view is of whatever the rover happens to be sweeping past, which the policy has
+    never been trained on. Scaled by the policy's own confidence so an
+    out-of-distribution frame (night, rain, a different city) cannot outvote GPS.
+    """
+    if abs(err_deg) > cfg.vision_max_err_deg:
+        return 0.0
+    return clamp(cfg.vision_alpha * clamp(confidence, 0.0, 1.0), 0.0, 1.0)
+
+
+def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5, min_linear=0.0):
+    """Blend steering; take the more cautious speed, but never below `min_linear`
+    unless the GPS controller itself wants a stop.
+
+    The floor exists because `vis_lin` comes from behaviour cloning on hesitant
+    human teleop, and MSE regression on a multi-modal target pulls toward the mean.
+    A policy that outputs a small `linear` on most frames would otherwise pin the
+    rover to a crawl for the whole mission — and score is difficulty x time.
+    """
+    angular = clamp((1 - alpha) * gps_ang + alpha * vis_ang, -1.0, 1.0)
+    if gps_lin <= 0.0:
+        return 0.0, angular                    # a deliberate stop stays a stop
+    linear = max(min(min_linear, gps_lin), min(gps_lin, max(0.0, vis_lin)))
+    return linear, angular
 
 
 def run(io, cfg, route_file=None, vision_fn=None, logger=None):
@@ -227,11 +279,22 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
 
             linear, angular, err = steer(dist, brg, heading, cfg)
             if vision_fn is not None:
-                vf = io.front_frame()
-                if vf is not None:
-                    vlin, vang = vision_fn(vf)
-                    if vlin is not None:
-                        linear, angular = _fuse(angular, vang, linear, vlin)
+                vf, vts = io.front_frame()
+                if vf is None:
+                    vsrc = "no-frame"
+                elif not frame_is_fresh(vts, now, cfg):
+                    vsrc = "stale"          # stalled stream: steer on GPS alone
+                    if not warned_stale_frames:
+                        warned_stale_frames = True
+                        print("[follower] camera frames are stale — GPS-only steering")
+                else:
+                    vlin, vang, vconf = vision_fn(vf)
+                    alpha = fuse_gate(err, vconf, cfg) if vlin is not None else 0.0
+                    vsrc = f"a{alpha:.2f}"
+                    if alpha > 0:
+                        linear, angular = _fuse(angular, vang, linear, vlin,
+                                                alpha=alpha,
+                                                min_linear=cfg.vision_min_linear)
             angular = clamp(angular, prev_ang - cfg.max_dang, prev_ang + cfg.max_dang)  # slew
             prev_ang = angular
             io.control(linear, angular)
@@ -268,13 +331,17 @@ def _load_vision(ckpt_path):
     size = ck["img"]
 
     def infer(frame_bytes):
+        """Return (linear, angular, confidence). The current policy has no
+        uncertainty output, so confidence is 1.0 — a real signal needs the second
+        head from #7. The err-gate and VISION_ALPHA still apply either way."""
         try:
             im = Image.open(BytesIO(frame_bytes)).convert("RGB").resize((size, size))
         except Exception:
-            return None, None
+            return None, None, 0.0
         t = torch.tensor(list(im.getdata()), dtype=torch.float32).view(size, size, 3)
         t = (t / 255.0).permute(2, 0, 1)
-        return model.act(t)
+        lin, ang = model.act(t)
+        return lin, ang, 1.0
     return infer
 
 
