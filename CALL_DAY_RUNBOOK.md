@@ -41,6 +41,12 @@ cd ~/codebases/earth-rover-challenge
 SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py   # 3/3 over HTTP
 ```
 
+## ⛔ Do not run /end-mission
+The SDK's docs: *"should only be used in case of emergency. If you run this endpoint you will
+lose all your progress."* Nothing in this repo calls it, and the client method is named
+`emergency_abort_lose_all_progress(confirm=True)` so it cannot be reached by accident.
+To stop safely, just stop the rover — the mission stays open and a restart resumes it.
+
 ## Troubleshooting
 - `Bot unavailable for SDK` → bot not assigned / another session holds it; check allocation.
 - No GPS / `orientation` weird → confirm bot is outdoors with signal; re-run calibration.
