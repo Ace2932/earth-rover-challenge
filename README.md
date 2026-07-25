@@ -41,8 +41,13 @@ Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
   or exception still sends `control(0,0)`. The rover never runs away on an error.
 - **Request resilience:** `RoverClient` retries with backoff (verified surviving a 60%
   injected fault rate); on total failure the loop stops the rover rather than driving blind.
-- **Heading fusion:** uses GPS course-over-ground when moving (drift-free, no calibration)
-  and the magnetometer only when too slow — so a bad `orientation` calibration can't ruin a run.
+- **Heading estimation (`heading.py`):** a complementary filter. Yaw is dead-reckoned
+  between fixes (gyro if trusted, else the commanded angular); corrections come only from a
+  GPS course measured over an **odometry** baseline of `HEADING_MIN_MOVE_M`, rejected if the
+  rover turned while covering it or if the wheels moved but the GPS did not. The magnetometer
+  seeds the filter once and is never read again. Under sigma=1.5 m GPS noise this holds
+  ~2 deg median heading error; taking the course over a short baseline (the previous design)
+  gave ~88 deg and preferred it over the magnetometer 93% of the time.
 - **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
 - **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
