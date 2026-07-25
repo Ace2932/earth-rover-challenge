@@ -38,7 +38,7 @@ class FlakyIO:
         self.control_calls = 0
 
     def waypoints(self, route_file):
-        return [(37.8719 + 300 / M_PER_DEG, -122.2585)]
+        return [(37.8719 + 300 / M_PER_DEG, -122.2585)], 0
 
     def get_pose(self):
         self.pose_calls += 1
