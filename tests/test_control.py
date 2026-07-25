@@ -1,4 +1,4 @@
-from waypoint_follower import Config, steer, _fuse, HeadingEstimator
+from waypoint_follower import Config, steer, _fuse
 
 CFG = Config()
 
@@ -37,11 +37,6 @@ def test_fuse_conflict_cancels():
     assert abs(ang) < 1e-6
 
 
-def test_heading_estimator_gps_when_moving():
-    est = HeadingEstimator(Config())
-    h0, src0 = est.estimate(0.0, 0.0, 0.0)
-    assert src0 == "mag"                      # first fix -> magnetometer
-    north = 2.0 / 111111.0                    # ~2 m north (> heading_min_move_m)
-    h1, src1 = est.estimate(north, 0.0, 0.0)
-    assert src1 == "gps"
-    assert abs(h1 - 0) < 1.0                  # course is due north
+# Heading estimation moved to heading.py — see tests/test_heading.py. The old test
+# here asserted that a 2 m move yields a trusted GPS course, which is the bug in #1:
+# under real GPS noise a 2 m "move" is indistinguishable from standing still.
