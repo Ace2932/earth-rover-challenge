@@ -221,3 +221,16 @@ def test_heartbeat_is_refreshed_while_streaming_and_removed_on_close(tmp_path):
     finally:
         c.close()
     assert not hb.exists()                     # clean shutdown, not a crash
+
+
+def test_live_io_records_the_command_for_the_heading_estimator():
+    """Regression for #29. tests/test_heading.py drives HeadingEstimator directly, so
+    it cannot see LiveIO forgetting to record the command — and without that record
+    the estimator's motion gate never opens and no GPS course is ever accepted."""
+    from waypoint_follower import Config, LiveIO
+
+    io = LiveIO.__new__(LiveIO)          # no network, no Commander thread
+    io.last_cmd = (0.0, 0.0)
+    io.cmd = type("Stub", (), {"set": lambda self, lin, ang: None})()
+    LiveIO.control(io, 0.5, -0.2)
+    assert io.last_cmd == (0.5, -0.2)

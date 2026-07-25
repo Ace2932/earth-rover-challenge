@@ -136,6 +136,7 @@ class LiveIO:
                              heartbeat_path=heartbeat_path)
         self.h = HeadingEstimator(cfg)
         self.hsrc = "mag"
+        self.last_cmd = (0.0, 0.0)
 
     def get_pose(self):
         d = self.c.get_data()
@@ -145,6 +146,7 @@ class LiveIO:
 
     def control(self, linear, angular):
         """Publish a setpoint. The Commander thread streams it; this never blocks."""
+        self.last_cmd = (linear, angular)   # the heading estimator's motion gate (#29)
         self.cmd.set(linear, angular)
 
     def close(self):
