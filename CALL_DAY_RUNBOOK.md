@@ -43,6 +43,10 @@ SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py   # 3/3
 
 ## Troubleshooting
 - `Bot unavailable for SDK` → bot not assigned / another session holds it; check allocation.
+  The follower now aborts with `cannot start: /start-mission refused: ...` (exit 2) instead
+  of pretending the run completed.
+- Follower crashed mid-mission → just restart it. It reads `latest_scanned_checkpoint` and
+  picks up at the next checkpoint (`resuming: server reports N/M already reached`).
 - No GPS / `orientation` weird → confirm bot is outdoors with signal; re-run calibration.
 - Chrome errors → fix `CHROME_EXECUTABLE_PATH`; SDK needs Chrome 143+.
 - Follower turns in place forever → heading sign/offset wrong → redo calibration + sign check.
