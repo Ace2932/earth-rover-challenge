@@ -91,10 +91,19 @@ class RoverClient:
 
     # --- Missions API ---
     def start_mission(self):
+        """Return (ok, body). A 400 here is usually "Bot unavailable for SDK" — the
+        bot is not assigned to you, or another session holds it. That is fatal, not
+        something to swallow: swallowing it yields an empty route and a run that
+        reports success without moving."""
         try:
-            return self._req("POST", "/start-mission").json()
-        except requests.RequestException:
-            return {}      # mission may already be running; not fatal
+            r = self.s.post(f"{self.base}/start-mission", json={}, timeout=self.timeout)
+        except requests.RequestException as e:
+            return False, {"detail": str(e)}
+        try:
+            body = r.json()
+        except ValueError:
+            body = {}
+        return (r.status_code == 200), body
 
     def checkpoints(self):
         return self._req("GET", "/checkpoints-list").json()

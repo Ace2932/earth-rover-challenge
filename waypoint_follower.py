@@ -25,11 +25,16 @@ import time
 from dataclasses import dataclass
 
 from geo import haversine_m, bearing_deg, wrap180
+from heading import HeadingEstimator
 from rover_client import server_distance
 
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+class MissionUnavailable(RuntimeError):
+    """No usable route: the bot is not available, or the mission has no checkpoints."""
 
 
 @dataclass
@@ -49,8 +54,21 @@ class Config:
     loop_hz: float = 5.0
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
-    heading_min_move_m: float = 0.7    # move at least this to trust GPS course
-    # magnetometer fallback: heading = SIGN*orientation*SCALE + OFFSET
+
+    # --- heading estimation (see heading.py) ---
+    heading_min_move_m: float = 8.0    # ODOMETRY baseline a course needs to beat the noise
+    heading_max_turn_deg: float = 30.0 # reject a course if we turned this much covering it
+    heading_gain: float = 0.25         # floor on the correction gain (see heading._gain)
+    heading_slip_ratio: float = 0.75   # GPS chord below this * odometry = wheels slipping
+    heading_anchor_max_age_s: float = 30.0
+    max_speed_mps: float = 1.5         # m/s at linear=1.0 (odometry model when telemetry
+                                       # gives no `speed`)
+    heading_min_linear: float = 0.05   # commanded throttle below this = not moving
+    heading_min_speed: float = 0.05    # telemetry speed below this = not moving
+    yaw_rate_dps: float = 90.0         # deg/s at angular=1.0 (dead-reckoning model)
+    use_gyro: int = 0                  # 1 = trust /data gyros for yaw rate (verify units first)
+    # magnetometer seed only, until the first GPS course lands:
+    # heading = SIGN*orientation*SCALE + OFFSET
     heading_scale: float = 360.0 / 255.0
     heading_offset: float = 0.0
     heading_sign: float = 1.0
@@ -80,27 +98,6 @@ def steer(dist, bearing, heading, cfg):
     return linear, angular, err
 
 
-class HeadingEstimator:
-    """Fuse heading: GPS course-over-ground when moving (drift-free, no calibration),
-    magnetometer `orientation` when too slow for GPS course to be meaningful."""
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.anchor = None       # last GPS fix we computed course from
-
-    def estimate(self, lat, lon, orientation):
-        mag = (self.cfg.heading_sign * orientation * self.cfg.heading_scale
-               + self.cfg.heading_offset) % 360.0
-        if self.anchor is None:
-            self.anchor = (lat, lon)
-            return mag, "mag"
-        moved = haversine_m(self.anchor[0], self.anchor[1], lat, lon)
-        if moved >= self.cfg.heading_min_move_m:
-            course = bearing_deg(self.anchor[0], self.anchor[1], lat, lon)
-            self.anchor = (lat, lon)
-            return course, "gps"
-        return mag, "mag"
-
-
 class RunLogger:
     COLS = "t,wp,lat,lon,heading,hsrc,dist,sdist,bearing,err,linear,angular"
 
@@ -117,20 +114,39 @@ class RunLogger:
 
 
 # ---------------- live backend ----------------
+def _gyro_z(data, enabled):
+    """Yaw rate from /data's `gyros`, or None. Off by default: the SDK does not
+    document the axis order or the units, so verify on a real bot before trusting it."""
+    if not enabled:
+        return None
+    try:
+        return float(data["gyros"][-1][2])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
 class LiveIO:
     def __init__(self, cfg):
         from rover_client import RoverClient
+        self.cfg = cfg
         self.c = RoverClient(base_url=os.getenv("SDK_BASE_URL", "http://localhost:8000"))
         self.h = HeadingEstimator(cfg)
         self.hsrc = "mag"
+        self.last_cmd = (0.0, 0.0)      # what the estimator assumes is in force
 
     def get_pose(self):
         d = self.c.get_data()
         lat, lon = float(d["latitude"]), float(d["longitude"])
-        heading, self.hsrc = self.h.estimate(lat, lon, float(d.get("orientation", 0)))
+        speed = d.get("speed")
+        heading, self.hsrc = self.h.update(
+            lat, lon, float(d.get("orientation", 0)),
+            cmd_linear=self.last_cmd[0], cmd_angular=self.last_cmd[1],
+            gyro_z_dps=_gyro_z(d, self.cfg.use_gyro),
+            speed=None if speed is None else float(speed))
         return lat, lon, heading
 
     def control(self, linear, angular):
+        self.last_cmd = (linear, angular)
         self.c.control(linear, angular)
 
     def front_frame(self):
@@ -141,13 +157,37 @@ class LiveIO:
             return None
 
     def waypoints(self, route_file):
+        """Return (waypoints, start_index). Raises MissionUnavailable rather than
+        handing back an empty route, which the loop would report as success."""
         if route_file:
             with open(route_file) as f:
                 pts = json.load(f)
-        else:
-            self.c.start_mission()
-            pts = self.c.checkpoints()["checkpoints_list"]
-        return [(float(p["latitude"]), float(p["longitude"])) for p in pts]
+            return [(float(p["latitude"]), float(p["longitude"])) for p in pts], 0
+
+        ok, body = self.c.start_mission()
+        if not ok and "unavailable" in str(body.get("detail", "")).lower():
+            raise MissionUnavailable(
+                f"/start-mission refused: {body.get('detail')}. The bot is not assigned "
+                f"to this token, or another session holds it — check your allocation.")
+
+        payload = self.c.checkpoints()
+        pts = payload.get("checkpoints_list") or []
+        if not pts:
+            raise MissionUnavailable(
+                "/checkpoints-list returned no checkpoints. Is MISSION_SLUG set and the "
+                "mission started? (Refusing to 'complete' a zero-waypoint route.)")
+
+        # `sequence` is the authority on order; payload order is not guaranteed.
+        pts = sorted(pts, key=lambda p: int(p.get("sequence", 0)))
+        wps = [(float(p["latitude"]), float(p["longitude"])) for p in pts]
+
+        # Resume: the server counts how many checkpoints it has already accepted, so
+        # that many are done. Only one SDK session may hold a bot, which makes a
+        # crash-restart the only recovery path available — it has to resume correctly.
+        start = clamp(int(payload.get("latest_scanned_checkpoint", 0) or 0), 0, len(wps))
+        if start:
+            print(f"[follower] resuming: server reports {start}/{len(wps)} already reached")
+        return wps, start
 
     def reached(self):
         return self.c.checkpoint_reached()      # (ok, detail)
@@ -181,7 +221,7 @@ class MockIO:
         b = (self.lat, self.lon)
         return [(b[0] + 0.0002, b[1] + 0.0001),
                 (b[0] + 0.0003, b[1] + 0.0004),
-                (b[0] + 0.0000, b[1] + 0.0005)]
+                (b[0] + 0.0000, b[1] + 0.0005)], 0
 
     def reached(self):
         return True, {}
@@ -192,11 +232,14 @@ def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
 
 
 def run(io, cfg, route_file=None, vision_fn=None, logger=None):
-    wps = io.waypoints(route_file)
-    # #19 changes this contract to (waypoints, start_index). Accept both while
-    # the branches are in flight, so merge order cannot break the loop.
-    wps, start = wps if isinstance(wps, tuple) else (wps, 0)
-    print(f"[follower] {len(wps)} waypoints")
+    wps, start = io.waypoints(route_file)
+    if not wps:
+        # Never report success for a route we never had. An empty list here means
+        # the mission never started (see MissionUnavailable).
+        print("[follower] no waypoints — refusing to run")
+        io.control(0, 0)
+        return False
+    print(f"[follower] {len(wps)} waypoints, starting at {start + 1}")
     is_mock = isinstance(io, MockIO)
     period = 1.0 / cfg.loop_hz
     i, step = start, 0
@@ -274,7 +317,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
         io.control(0, 0)              # ALWAYS stop the rover, even on crash/ctrl-c
         if logger:
             logger.close()
-    done = i >= len(wps)
+    done = bool(wps) and i >= len(wps)
     print(f"[follower] {'COMPLETE' if done else 'STOPPED'} — {i}/{len(wps)} waypoints, {step} steps")
     return done
 
@@ -325,7 +368,11 @@ def main():
     io = MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock else LiveIO(cfg)
     vision_fn = _load_vision(args.vision) if args.vision else None
     logger = RunLogger(args.log) if args.log else None
-    run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
+    try:
+        run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
+    except MissionUnavailable as e:
+        print(f"[follower] cannot start: {e}")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
