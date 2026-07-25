@@ -22,7 +22,10 @@ which maps directly onto standard robot nav.
 
 ## Setup
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt      # runtime + pytest
+# only if you want --vision (torch, torchvision, pillow, opencv, ...):
+.venv/bin/pip install -r vision/requirements.txt
 ```
 
 ## Quick start — works right now, no hardware

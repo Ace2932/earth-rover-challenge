@@ -255,6 +255,16 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     return done
 
 
+def vision_import_help(exc):
+    """--vision needs the ML stack, which is deliberately not in requirements.txt so
+    GPS-only navigation stays a `pip install requests` away. Say which file to
+    install rather than surfacing a bare ImportError."""
+    return (f"--vision needs dependencies that are not installed: {exc}\n"
+            f"  pip install -r vision/requirements.txt\n"
+            f"    (torch, torchvision, pillow, opencv — a few hundred MB)\n"
+            f"GPS-only navigation needs none of them: drop --vision.")
+
+
 def _load_vision(ckpt_path):
     import torch
     from io import BytesIO
@@ -299,7 +309,11 @@ def main():
 
     cfg = Config.from_env()
     io = MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock else LiveIO(cfg)
-    vision_fn = _load_vision(args.vision) if args.vision else None
+    try:
+        vision_fn = _load_vision(args.vision) if args.vision else None
+    except ImportError as e:
+        print(vision_import_help(e))
+        return
     logger = RunLogger(args.log) if args.log else None
     run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
 
