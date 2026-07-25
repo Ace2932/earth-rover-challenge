@@ -107,7 +107,7 @@ class WedgedIO:
         self.closed = False
 
     def waypoints(self, route_file):
-        return [(37.8719 + self.dist_m / M_PER_DEG, -122.2585)]
+        return [(37.8719 + self.dist_m / M_PER_DEG, -122.2585)], 0
 
     def get_pose(self):
         return 37.8719, -122.2585, 0.0
