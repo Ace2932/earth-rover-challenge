@@ -37,8 +37,19 @@ SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py
 Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
 
 ### Built for a real 4G rover
-- **Safety-stop always:** the control loop is wrapped in `try/finally` — any crash, `Ctrl-C`,
-  or exception still sends `control(0,0)`. The rover never runs away on an error.
+- **Commands are streamed, not fired once (`commander.py`):** a background thread re-sends the
+  current setpoint at `COMMAND_HZ` (20 Hz, matching the SDK's own reference teleop), because
+  `/control` is an unacked Agora RTM message — an HTTP 200 means the browser called
+  `sendMessage`, not that the bot heard it. `set()` never blocks on the network.
+- **Stale setpoint decays to a stop:** if the control loop stops publishing for
+  `SETPOINT_STALE_S` (0.5 s) — blocked on a slow request, wedged, anything — the stream falls
+  to `(0,0)` instead of holding throttle. An in-process watchdog, for free.
+- **Out-of-process watchdog (`watchdog.py`, `--watchdog`):** `try/finally` cannot survive
+  `kill -9`, an OOM, or the laptop sleeping, and the rover latches its last command. A second
+  process watches a heartbeat and stops the rover if it goes stale. Verified: `kill -9` on the
+  follower produced a stop **1.07 s** later and zero false stops while healthy.
+- **Hardened stop:** on exit the stop is retried, and the telemetry is read back to confirm
+  `speed` actually fell to zero — an HTTP 200 is not evidence the rover stopped.
 - **Request resilience:** `RoverClient` retries with backoff (verified surviving a 60%
   injected fault rate); on total failure the loop stops the rover rather than driving blind.
 - **Heading fusion:** uses GPS course-over-ground when moving (drift-free, no calibration)

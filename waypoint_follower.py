@@ -21,6 +21,9 @@ import argparse
 import json
 import math
 import os
+import subprocess
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 
@@ -44,6 +47,12 @@ class Config:
     loop_hz: float = 5.0
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
+
+    # --- command streaming (see commander.py) ---
+    command_hz: float = 20.0           # rate the setpoint is re-sent to the bot
+    setpoint_stale_s: float = 0.5      # setpoint older than this decays to a stop
+    control_timeout_s: float = 1.0     # a stale command is worse than a dropped one
+    data_timeout_s: float = 1.5
     heading_min_move_m: float = 0.7    # move at least this to trust GPS course
     # magnetometer fallback: heading = SIGN*orientation*SCALE + OFFSET
     heading_scale: float = 360.0 / 255.0
@@ -113,9 +122,18 @@ class RunLogger:
 
 # ---------------- live backend ----------------
 class LiveIO:
-    def __init__(self, cfg):
+    def __init__(self, cfg, heartbeat_path=None):
         from rover_client import RoverClient
-        self.c = RoverClient(base_url=os.getenv("SDK_BASE_URL", "http://localhost:8000"))
+        from commander import Commander
+        base = os.getenv("SDK_BASE_URL", "http://localhost:8000")
+        self.cfg = cfg
+        self.c = RoverClient(base_url=base, timeout=cfg.data_timeout_s)
+        # A separate client for commands: one attempt, short timeout. Retrying a
+        # control message is pointless — the streamer sends a fresher one in 50 ms.
+        self._cc = RoverClient(base_url=base, timeout=cfg.control_timeout_s, retries=1)
+        self.cmd = Commander(lambda lin, ang: self._cc.control(lin, ang),
+                             hz=cfg.command_hz, stale_s=cfg.setpoint_stale_s,
+                             heartbeat_path=heartbeat_path)
         self.h = HeadingEstimator(cfg)
         self.hsrc = "mag"
 
@@ -126,7 +144,29 @@ class LiveIO:
         return lat, lon, heading
 
     def control(self, linear, angular):
-        self.c.control(linear, angular)
+        """Publish a setpoint. The Commander thread streams it; this never blocks."""
+        self.cmd.set(linear, angular)
+
+    def close(self):
+        """Stop the rover, then check the telemetry agrees that it stopped."""
+        self.cmd.close()
+        for _ in range(6):
+            try:
+                d = self.c.get_data()
+            except Exception:
+                time.sleep(0.3)
+                continue
+            speed = abs(float(d.get("speed", 0) or 0))
+            if speed < 0.05:
+                return True
+            print(f"[follower] STILL MOVING after stop (speed {speed:.2f}) — resending")
+            try:
+                self._cc.control(0.0, 0.0)
+            except Exception:
+                pass
+            time.sleep(0.3)
+        print("[follower] WARNING: could not confirm the rover stopped")
+        return False
 
     def front_frame(self):
         try:
@@ -172,6 +212,9 @@ class MockIO:
     def front_frame(self):
         return None
 
+    def close(self):
+        self.control(0, 0)
+
     def waypoints(self, route_file):
         b = (self.lat, self.lon)
         return [(b[0] + 0.0002, b[1] + 0.0001),
@@ -196,6 +239,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
     last_reach_try = 0.0
+    deadline = t0
     try:
         while i < len(wps):
             now = time.time()
@@ -245,9 +289,19 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                       f"err={err:+6.1f} lin={linear:+.2f} ang={angular:+.2f}")
             step += 1
             if not is_mock:
-                time.sleep(period)
+                # Hold the loop rate: sleeping a fixed period AFTER the work makes the
+                # real rate `period + work`, which drifts as the link slows down.
+                deadline = max(deadline + period, time.time() - period)
+                time.sleep(max(0.0, deadline - time.time()))
     finally:
-        io.control(0, 0)              # ALWAYS stop the rover, even on crash/ctrl-c
+        # ALWAYS stop the rover — crash, Ctrl-C, or a clean finish. close() does the
+        # hardened version (retried stop, telemetry check); control(0,0) is the
+        # fallback for backends that have no Commander.
+        try:
+            closer = getattr(io, "close", None)
+            closer() if closer else io.control(0, 0)
+        except Exception as e:
+            print(f"[follower] stop failed: {e}")
         if logger:
             logger.close()
     done = i >= len(wps)
@@ -289,6 +343,11 @@ def main():
                     help=f"fuse a trained sidewalk policy; bare --vision loads "
                          f"{os.path.relpath(DEFAULT_VISION)}, or pass a checkpoint path")
     ap.add_argument("--log", help="write a per-step CSV to this path")
+    ap.add_argument("--heartbeat", default=os.getenv("HEARTBEAT_PATH"),
+                    help="file the command streamer touches on every delivered command")
+    ap.add_argument("--watchdog", action="store_true",
+                    help="also run watchdog.py in a separate process; it stops the rover "
+                         "if this one dies without cleaning up (kill -9, OOM, sleep)")
     args = ap.parse_args()
 
     if args.vision and not os.path.exists(args.vision):
@@ -298,10 +357,31 @@ def main():
         return
 
     cfg = Config.from_env()
-    io = MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock else LiveIO(cfg)
+    heartbeat = args.heartbeat or (os.path.join(tempfile.gettempdir(), "erc_follower.hb")
+                                   if args.watchdog else None)
+    watchdog = None
+    if args.watchdog and not args.mock:
+        watchdog = subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "watchdog.py"),
+             "--heartbeat", heartbeat, "--base-url",
+             os.getenv("SDK_BASE_URL", "http://localhost:8000")])
+        print(f"[follower] watchdog pid {watchdog.pid} on {heartbeat}")
+    elif args.watchdog:
+        print("[follower] --watchdog ignored in --mock (no rover to run away)")
+
+    io = (MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock
+          else LiveIO(cfg, heartbeat_path=heartbeat))
     vision_fn = _load_vision(args.vision) if args.vision else None
     logger = RunLogger(args.log) if args.log else None
-    run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
+    try:
+        run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
+    finally:
+        if watchdog:
+            try:
+                watchdog.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                watchdog.terminate()
 
 
 if __name__ == "__main__":

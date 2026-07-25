@@ -30,6 +30,19 @@ export HEADING_SCALE=... HEADING_OFFSET=... HEADING_SIGN=...
 .venv/bin/python waypoint_follower.py         # waypoints from /checkpoints-list
 ```
 
+## ⚠️ First live session: find out whether the bot has its own watchdog
+Send a command, kill the client hard, and watch:
+```bash
+curl -s -XPOST localhost:8000/control -H 'content-type: application/json' \
+  -d '{"command":{"linear":0.3,"angular":0,"lamp":0}}'   # keep ~2 m clear ahead
+# ...then stop sending. Does it coast to a stop by itself, and how fast?
+```
+Ask Frodobots directly whether the firmware zeroes on RTM loss and after what timeout.
+Until that is answered, drive with `--watchdog`:
+```bash
+.venv/bin/python waypoint_follower.py --watchdog --log run1.csv
+```
+
 ## Sign check (the one thing calibration can't fully resolve in one run)
 Start the follower. If it steers *away* from the target (error grows, spins):
 `export HEADING_SIGN=-1` and negate `HEADING_OFFSET`, re-run. That's the only likely gotcha.
