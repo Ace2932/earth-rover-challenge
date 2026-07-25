@@ -59,6 +59,10 @@ The fake server reproduces the SDK's real responses, including the `400` with
   ~2 deg median heading error; taking the course over a short baseline (the previous design)
   gave ~88 deg and preferred it over the magnetometer 93% of the time.
 - **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
+- **Fails loud, resumes correctly:** a refused `/start-mission` (400 "Bot unavailable for SDK")
+  or an empty checkpoint list aborts with `MissionUnavailable` instead of reporting
+  `COMPLETE — 0/0`. Checkpoints are ordered by `sequence`, and a restart resumes from the
+  server's `latest_scanned_checkpoint` rather than driving the whole route again.
 - **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 
