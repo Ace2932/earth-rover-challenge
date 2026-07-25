@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 
 from geo import haversine_m, bearing_deg, wrap180
+from telemetry import Guard
 
 
 def clamp(v, lo, hi):
@@ -44,6 +45,14 @@ class Config:
     loop_hz: float = 5.0
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
+
+    # --- telemetry guards (see telemetry.py) ---
+    battery_abort_pct: float = 15.0    # park rather than die somewhere inconvenient
+    battery_warn_pct: float = 30.0
+    gps_signal_good: float = 20.0      # units undocumented; good == poor disables this
+    gps_signal_poor: float = 5.0
+    min_speed_scale: float = 0.3       # slowest we will crawl on a bad fix
+    no_motion_s: float = 4.0           # commanded to move this long with no wheel motion
     heading_min_move_m: float = 0.7    # move at least this to trust GPS course
     # magnetometer fallback: heading = SIGN*orientation*SCALE + OFFSET
     heading_scale: float = 360.0 / 255.0
@@ -118,9 +127,11 @@ class LiveIO:
         self.c = RoverClient(base_url=os.getenv("SDK_BASE_URL", "http://localhost:8000"))
         self.h = HeadingEstimator(cfg)
         self.hsrc = "mag"
+        self.last_data = None
 
     def get_pose(self):
         d = self.c.get_data()
+        self.last_data = d          # the guards read the rest of the payload
         lat, lon = float(d["latitude"]), float(d["longitude"])
         heading, self.hsrc = self.h.estimate(lat, lon, float(d.get("orientation", 0)))
         return lat, lon, heading
@@ -196,6 +207,10 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
     last_reach_try = 0.0
+    guard = Guard(cfg)
+    prev_lin = 0.0
+    warned_no_motion = False
+    aborted = False
     try:
         while i < len(wps):
             now = time.time()
@@ -225,7 +240,23 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
                     continue
 
+            # Telemetry guards: battery floor, GPS-quality speed scaling, and a
+            # commanded-vs-actual motion check that notices a rover going nowhere
+            # well before STUCK_S does.
+            verdict = guard.check(getattr(io, "last_data", None), prev_lin, now)
+            for w in verdict.warnings:
+                print(f"[follower] WARNING: {w}")
+            if verdict.abort:
+                print(f"[follower] ABORT: {verdict.abort}")
+                aborted = True
+                break
+            if verdict.no_motion and not warned_no_motion:
+                warned_no_motion = True
+                print("[follower] commanded to move but no wheel motion — dropped "
+                      "command, or the rover is held up on something")
+
             linear, angular, err = steer(dist, brg, heading, cfg)
+            linear *= verdict.speed_scale
             if vision_fn is not None:
                 vf = io.front_frame()
                 if vf is not None:
@@ -233,7 +264,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     if vlin is not None:
                         linear, angular = _fuse(angular, vang, linear, vlin)
             angular = clamp(angular, prev_ang - cfg.max_dang, prev_ang + cfg.max_dang)  # slew
-            prev_ang = angular
+            prev_ang, prev_lin = angular, linear
             io.control(linear, angular)
 
             if logger:
@@ -250,7 +281,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
         io.control(0, 0)              # ALWAYS stop the rover, even on crash/ctrl-c
         if logger:
             logger.close()
-    done = i >= len(wps)
+    done = i >= len(wps) and not aborted
     print(f"[follower] {'COMPLETE' if done else 'STOPPED'} — {i}/{len(wps)} waypoints, {step} steps")
     return done
 

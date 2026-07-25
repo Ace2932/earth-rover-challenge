@@ -45,6 +45,10 @@ Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
   and the magnetometer only when too slow — so a bad `orientation` calibration can't ruin a run.
 - **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
 - **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
+- **Telemetry guards (`telemetry.py`):** `/data` carries more than a position. The loop now
+  parks below `BATTERY_ABORT_PCT` rather than dying somewhere inconvenient, scales speed down
+  between `GPS_SIGNAL_POOR` and `GPS_SIGNAL_GOOD`, and flags "commanded to move, no wheel
+  motion" (a dropped RTM command, or a rover held up on something) before `STUCK_S` does.
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 
 Both quick-start commands end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON

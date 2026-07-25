@@ -44,6 +44,11 @@ SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py   # 3/3
 ## Troubleshooting
 - `Bot unavailable for SDK` → bot not assigned / another session holds it; check allocation.
 - No GPS / `orientation` weird → confirm bot is outdoors with signal; re-run calibration.
+- **Check what `gps_signal` actually means** on the first live run: `curl -s localhost:8000/data`
+  outdoors vs. beside a building. The guards assume higher = better on a 0..31-ish scale. If it
+  turns out to be the opposite (an HDOP-style figure), set `GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0`
+  to disable the scaling until the mapping is confirmed.
+- `ABORT: battery ...` → the run stopped on purpose. Charge, then restart; it resumes.
 - Chrome errors → fix `CHROME_EXECUTABLE_PATH`; SDK needs Chrome 143+.
 - Follower turns in place forever → heading sign/offset wrong → redo calibration + sign check.
 - Overshoots checkpoints → lower `CRUISE`, raise `KP_ANG`, or widen `CHECKPOINT_RADIUS_M`.
