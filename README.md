@@ -33,8 +33,18 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # B) full HTTP path against a fake SDK server (proves the live client/server integration)
 .venv/bin/python fake_sdk_server.py 8777 &
 SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py
+
+# C) the same, under realistic 4G/urban conditions — noisy + biased GPS, laggy telemetry,
+#    silently dropped control messages, and the server's real 15 m checkpoint tolerance
+FAKE_GPS_SIGMA_M=1.5 FAKE_GPS_BIAS_M=8 FAKE_TELEMETRY_LATENCY_S=0.5 \
+  FAKE_CONTROL_DROP_RATE=0.05 .venv/bin/python fake_sdk_server.py 8777 &
+SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py
 ```
 Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
+
+The fake server reproduces the SDK's real responses, including the `400` with
+`proximate_distance_to_checkpoint` you get whenever you are not close enough — see
+`.env.example` for every `FAKE_*` knob. All error injection is off by default.
 
 ### Built for a real 4G rover
 - **Safety-stop always:** the control loop is wrapped in `try/finally` — any crash, `Ctrl-C`,
