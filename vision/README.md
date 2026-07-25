@@ -4,6 +4,10 @@ Turns "reaches GPS checkpoints" into "stays on the sidewalk between them." A beh
 cloning policy maps the front camera frame → steering, fused with the GPS-bearing
 follower: **GPS picks the direction, vision keeps the wheels on the walkable surface.**
 
+> The trained checkpoint is **not in the repo** (43 MB, `*.pt` is gitignored).
+> `bash vision/fetch_model.sh` downloads and verifies it; `MODEL_CARD.md` says what it is,
+> what it was trained on, and why you should gate it hard. GPS-only navigation needs none of it.
+
 ## Files
 | File | Role |
 |---|---|
@@ -12,6 +16,8 @@ follower: **GPS picks the direction, vision keeps the wheels on the walkable sur
 | `train.py` | BC trainer (MSE, MPS/CUDA). |
 | `fuse.py` | `fuse_steer(gps, vision)` → `/control` + end-to-end demo. |
 | `inspect_dataset.py` | Stream a real sample once you have HF access. |
+| `fetch_model.sh` | Download + sha256-verify the default `--vision` checkpoint. |
+| `MODEL_CARD.md` | What the shipped checkpoint is, measured behaviour, and its limits. |
 
 ## Proven now (synthetic, no data/GPU needed)
 ```bash

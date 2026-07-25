@@ -19,6 +19,7 @@ which maps directly onto standard robot nav.
 | `calibrate_heading.py` | Recover the bot's `orientation`→degrees mapping (run once per bot). |
 | `CALL_DAY_RUNBOOK.md` | Exact live bring-up steps for the onboarding call. |
 | `.env.example` | SDK + tuning config. |
+| `vision/fetch_model.sh` | Download + verify the `--vision` checkpoint (not in the repo). |
 
 ## Setup
 ```bash
