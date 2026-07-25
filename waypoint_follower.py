@@ -31,6 +31,10 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+class MissionUnavailable(RuntimeError):
+    """No usable route: the bot is not available, or the mission has no checkpoints."""
+
+
 @dataclass
 class Config:
     checkpoint_radius_m: float = 5.0   # gate to start asking the server "reached?"
@@ -136,13 +140,37 @@ class LiveIO:
             return None
 
     def waypoints(self, route_file):
+        """Return (waypoints, start_index). Raises MissionUnavailable rather than
+        handing back an empty route, which the loop would report as success."""
         if route_file:
             with open(route_file) as f:
                 pts = json.load(f)
-        else:
-            self.c.start_mission()
-            pts = self.c.checkpoints()["checkpoints_list"]
-        return [(float(p["latitude"]), float(p["longitude"])) for p in pts]
+            return [(float(p["latitude"]), float(p["longitude"])) for p in pts], 0
+
+        ok, body = self.c.start_mission()
+        if not ok and "unavailable" in str(body.get("detail", "")).lower():
+            raise MissionUnavailable(
+                f"/start-mission refused: {body.get('detail')}. The bot is not assigned "
+                f"to this token, or another session holds it — check your allocation.")
+
+        payload = self.c.checkpoints()
+        pts = payload.get("checkpoints_list") or []
+        if not pts:
+            raise MissionUnavailable(
+                "/checkpoints-list returned no checkpoints. Is MISSION_SLUG set and the "
+                "mission started? (Refusing to 'complete' a zero-waypoint route.)")
+
+        # `sequence` is the authority on order; payload order is not guaranteed.
+        pts = sorted(pts, key=lambda p: int(p.get("sequence", 0)))
+        wps = [(float(p["latitude"]), float(p["longitude"])) for p in pts]
+
+        # Resume: the server counts how many checkpoints it has already accepted, so
+        # that many are done. Only one SDK session may hold a bot, which makes a
+        # crash-restart the only recovery path available — it has to resume correctly.
+        start = clamp(int(payload.get("latest_scanned_checkpoint", 0) or 0), 0, len(wps))
+        if start:
+            print(f"[follower] resuming: server reports {start}/{len(wps)} already reached")
+        return wps, start
 
     def reached(self):
         return self.c.checkpoint_reached()      # (ok, detail)
@@ -176,7 +204,7 @@ class MockIO:
         b = (self.lat, self.lon)
         return [(b[0] + 0.0002, b[1] + 0.0001),
                 (b[0] + 0.0003, b[1] + 0.0004),
-                (b[0] + 0.0000, b[1] + 0.0005)]
+                (b[0] + 0.0000, b[1] + 0.0005)], 0
 
     def reached(self):
         return True, {}
@@ -187,11 +215,17 @@ def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
 
 
 def run(io, cfg, route_file=None, vision_fn=None, logger=None):
-    wps = io.waypoints(route_file)
-    print(f"[follower] {len(wps)} waypoints")
+    wps, start = io.waypoints(route_file)
+    if not wps:
+        # Never report success for a route we never had. An empty list here means
+        # the mission never started (see MissionUnavailable).
+        print("[follower] no waypoints — refusing to run")
+        io.control(0, 0)
+        return False
+    print(f"[follower] {len(wps)} waypoints, starting at {start + 1}")
     is_mock = isinstance(io, MockIO)
     period = 1.0 / cfg.loop_hz
-    i, step = 0, 0
+    i, step = start, 0
     prev_ang = 0.0
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
@@ -250,7 +284,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
         io.control(0, 0)              # ALWAYS stop the rover, even on crash/ctrl-c
         if logger:
             logger.close()
-    done = i >= len(wps)
+    done = bool(wps) and i >= len(wps)
     print(f"[follower] {'COMPLETE' if done else 'STOPPED'} — {i}/{len(wps)} waypoints, {step} steps")
     return done
 
@@ -301,7 +335,11 @@ def main():
     io = MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock else LiveIO(cfg)
     vision_fn = _load_vision(args.vision) if args.vision else None
     logger = RunLogger(args.log) if args.log else None
-    run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
+    try:
+        run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
+    except MissionUnavailable as e:
+        print(f"[follower] cannot start: {e}")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
