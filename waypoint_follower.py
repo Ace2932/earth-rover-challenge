@@ -24,6 +24,7 @@ import os
 import time
 from dataclasses import dataclass
 
+from envcfg import coerce
 from geo import haversine_m, bearing_deg, wrap180
 
 
@@ -52,11 +53,17 @@ class Config:
 
     @classmethod
     def from_env(cls):
+        """Every field is overridable by its UPPERCASE name. See envcfg.coerce for
+        why this does not just call `type(current)(value)`."""
         c = cls()
         for f in c.__dataclass_fields__:
             env = os.getenv(f.upper())
-            if env is not None:
-                setattr(c, f, type(getattr(c, f))(env))
+            if env is None:
+                continue
+            try:
+                setattr(c, f, coerce(getattr(c, f), env))
+            except ValueError as e:
+                raise ValueError(f"{f.upper()}: {e}") from None
         return c
 
 
