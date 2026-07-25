@@ -262,7 +262,7 @@ def _load_vision(ckpt_path):
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vision"))
     from policy import SidewalkPolicy
-    ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ck = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model = SidewalkPolicy(backbone=ck["backbone"])
     model.load_state_dict(ck["state_dict"])
     size = ck["img"]
