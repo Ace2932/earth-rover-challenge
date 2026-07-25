@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 
 from geo import haversine_m, bearing_deg, wrap180
+from heading import HeadingEstimator
 
 
 def clamp(v, lo, hi):
@@ -44,8 +45,21 @@ class Config:
     loop_hz: float = 5.0
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
-    heading_min_move_m: float = 0.7    # move at least this to trust GPS course
-    # magnetometer fallback: heading = SIGN*orientation*SCALE + OFFSET
+
+    # --- heading estimation (see heading.py) ---
+    heading_min_move_m: float = 8.0    # ODOMETRY baseline a course needs to beat the noise
+    heading_max_turn_deg: float = 30.0 # reject a course if we turned this much covering it
+    heading_gain: float = 0.25         # floor on the correction gain (see heading._gain)
+    heading_slip_ratio: float = 0.75   # GPS chord below this * odometry = wheels slipping
+    heading_anchor_max_age_s: float = 30.0
+    max_speed_mps: float = 1.5         # m/s at linear=1.0 (odometry model when telemetry
+                                       # gives no `speed`)
+    heading_min_linear: float = 0.05   # commanded throttle below this = not moving
+    heading_min_speed: float = 0.05    # telemetry speed below this = not moving
+    yaw_rate_dps: float = 90.0         # deg/s at angular=1.0 (dead-reckoning model)
+    use_gyro: int = 0                  # 1 = trust /data gyros for yaw rate (verify units first)
+    # magnetometer seed only, until the first GPS course lands:
+    # heading = SIGN*orientation*SCALE + OFFSET
     heading_scale: float = 360.0 / 255.0
     heading_offset: float = 0.0
     heading_sign: float = 1.0
@@ -75,27 +89,6 @@ def steer(dist, bearing, heading, cfg):
     return linear, angular, err
 
 
-class HeadingEstimator:
-    """Fuse heading: GPS course-over-ground when moving (drift-free, no calibration),
-    magnetometer `orientation` when too slow for GPS course to be meaningful."""
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.anchor = None       # last GPS fix we computed course from
-
-    def estimate(self, lat, lon, orientation):
-        mag = (self.cfg.heading_sign * orientation * self.cfg.heading_scale
-               + self.cfg.heading_offset) % 360.0
-        if self.anchor is None:
-            self.anchor = (lat, lon)
-            return mag, "mag"
-        moved = haversine_m(self.anchor[0], self.anchor[1], lat, lon)
-        if moved >= self.cfg.heading_min_move_m:
-            course = bearing_deg(self.anchor[0], self.anchor[1], lat, lon)
-            self.anchor = (lat, lon)
-            return course, "gps"
-        return mag, "mag"
-
-
 class RunLogger:
     COLS = "t,wp,lat,lon,heading,hsrc,dist,bearing,err,linear,angular"
 
@@ -112,20 +105,39 @@ class RunLogger:
 
 
 # ---------------- live backend ----------------
+def _gyro_z(data, enabled):
+    """Yaw rate from /data's `gyros`, or None. Off by default: the SDK does not
+    document the axis order or the units, so verify on a real bot before trusting it."""
+    if not enabled:
+        return None
+    try:
+        return float(data["gyros"][-1][2])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
 class LiveIO:
     def __init__(self, cfg):
         from rover_client import RoverClient
+        self.cfg = cfg
         self.c = RoverClient(base_url=os.getenv("SDK_BASE_URL", "http://localhost:8000"))
         self.h = HeadingEstimator(cfg)
         self.hsrc = "mag"
+        self.last_cmd = (0.0, 0.0)      # what the estimator assumes is in force
 
     def get_pose(self):
         d = self.c.get_data()
         lat, lon = float(d["latitude"]), float(d["longitude"])
-        heading, self.hsrc = self.h.estimate(lat, lon, float(d.get("orientation", 0)))
+        speed = d.get("speed")
+        heading, self.hsrc = self.h.update(
+            lat, lon, float(d.get("orientation", 0)),
+            cmd_linear=self.last_cmd[0], cmd_angular=self.last_cmd[1],
+            gyro_z_dps=_gyro_z(d, self.cfg.use_gyro),
+            speed=None if speed is None else float(speed))
         return lat, lon, heading
 
     def control(self, linear, angular):
+        self.last_cmd = (linear, angular)
         self.c.control(linear, angular)
 
     def front_frame(self):
