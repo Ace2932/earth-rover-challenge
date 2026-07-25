@@ -43,9 +43,7 @@ class ParkedIO:
         self.commands = []
 
     def waypoints(self, route_file):
-        # NOTE: PR #19 changes this contract to (waypoints, start_index); after both
-        # land this returns ([...], 0).
-        return [(37.8719 + self.dist_m / M_PER_DEG, -122.2585)]
+        return [(37.8719 + self.dist_m / M_PER_DEG, -122.2585)], 0
 
     def get_pose(self):
         self.steps += 1
