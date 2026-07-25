@@ -45,6 +45,11 @@ Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
   and the magnetometer only when too slow — so a bad `orientation` calibration can't ruin a run.
 - **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
 - **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
+- **Obstacle stop (`blocked.py`):** a second policy head predicts "path blocked" and forces
+  `linear=0`, with hysteresis in both directions — one noisy frame cannot brake the rover, and
+  the stop is held so it cannot chatter at a pedestrian. It fails open: no probability (no head,
+  failed inference) never brakes. The head is trained but **not yet trustworthy** — see
+  `vision/README.md` for the measured numbers.
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 
 Both quick-start commands end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON

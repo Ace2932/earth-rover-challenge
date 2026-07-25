@@ -41,7 +41,7 @@ def _demo():
         im, t = ds[i]
         if t[1] > 0.4:           # target angular clearly right
             img, tgt = im, t; break
-    v_lin, v_ang = model.act(img)
+    v_lin, v_ang, _ = model.act(img)
     print(f"vision policy on right-offset frame: linear={v_lin:.2f} angular={v_ang:+.2f} "
           f"(target angular {tgt[1]:+.2f})")
 

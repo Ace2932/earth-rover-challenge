@@ -24,6 +24,7 @@ import os
 import time
 from dataclasses import dataclass
 
+from blocked import BlockedGate
 from geo import haversine_m, bearing_deg, wrap180
 
 
@@ -44,6 +45,11 @@ class Config:
     loop_hz: float = 5.0
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
+
+    # --- obstacle stop (needs a policy with a blocked head; see blocked.py) ---
+    blocked_p: float = 0.8             # probability to call the path blocked; 1.0 = off
+    blocked_frames: int = 2            # consecutive frames before braking
+    blocked_hold_s: float = 1.5        # hold the stop this long (anti-chatter)
     heading_min_move_m: float = 0.7    # move at least this to trust GPS course
     # magnetometer fallback: heading = SIGN*orientation*SCALE + OFFSET
     heading_scale: float = 360.0 / 255.0
@@ -196,6 +202,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
     last_reach_try = 0.0
+    blocked_gate = BlockedGate(cfg)
+    blocked_now = False
     try:
         while i < len(wps):
             now = time.time()
@@ -229,9 +237,19 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             if vision_fn is not None:
                 vf = io.front_frame()
                 if vf is not None:
-                    vlin, vang = vision_fn(vf)
+                    vlin, vang, vblocked = vision_fn(vf)
                     if vlin is not None:
                         linear, angular = _fuse(angular, vang, linear, vlin)
+                    if blocked_gate.update(vblocked, now):
+                        # Something is in front of us. Steering still applies —
+                        # stopped and pointed the right way beats stopped and lost.
+                        linear = 0.0
+                        if not blocked_now:
+                            blocked_now = True
+                            print(f"[follower] BLOCKED (p={vblocked:.2f}) — holding")
+                    elif blocked_now:
+                        blocked_now = False
+                        print("[follower] path clear — resuming")
             angular = clamp(angular, prev_ang - cfg.max_dang, prev_ang + cfg.max_dang)  # slew
             prev_ang = angular
             io.control(linear, angular)
@@ -263,7 +281,8 @@ def _load_vision(ckpt_path):
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vision"))
     from policy import SidewalkPolicy
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    model = SidewalkPolicy(backbone=ck["backbone"])
+    model = SidewalkPolicy(backbone=ck["backbone"],
+                           blocked_head=bool(ck.get("blocked_head")))
     model.load_state_dict(ck["state_dict"])
     size = ck["img"]
 
@@ -271,7 +290,7 @@ def _load_vision(ckpt_path):
         try:
             im = Image.open(BytesIO(frame_bytes)).convert("RGB").resize((size, size))
         except Exception:
-            return None, None
+            return None, None, None
         t = torch.tensor(list(im.getdata()), dtype=torch.float32).view(size, size, 3)
         t = (t / 255.0).permute(2, 0, 1)
         return model.act(t)

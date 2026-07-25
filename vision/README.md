@@ -76,8 +76,39 @@ client.control(lin, ang)
 ```
 (`preprocess` = one small helper: `PIL.Image.open(BytesIO(frame)).resize((s,s))` → tensor/255.)
 
+## Obstacle stop (`--blocked`) — plumbing done, model NOT trustworthy yet
+
+`SidewalkPolicy(blocked_head=True)` adds a second output, P(path blocked), trained with BCE
+against a weak label from teleop: *the human was moving and has just stopped*
+(`blocked.blocked_labels`). There is no obstacle annotation in FrodoBots-2K, and a brake event
+is the closest real signal there is — it also fires for red lights, hesitation and boredom.
+
+```bash
+PYTHONPATH=vision python train.py --data data/frodobots-dataset-getting-started \
+  --backbone resnet18 --img 96 --stride 4 --epochs 8 --blocked --out sidewalk_blocked.pt
+```
+
+Measured on the getting-started subset (3 rides, 3983 samples, 398 val):
+
+```
+epoch  1-5   blocked[acc=0.98 p=0.00 r=0.00 base=0.02]   <- predicts "never blocked"
+epoch  7     blocked[acc=0.98 p=1.00 r=0.33 base=0.02]
+epoch  8     blocked[acc=0.96 p=0.37 r=0.78 base=0.02]
+```
+
+**Read that as a negative result.** Positives are 2% of the data — about 9 examples in the
+validation split — so precision/recall swing wildly between epochs and none of it is
+significant. The 0.98 accuracy is just the base rate. For five epochs the model simply learned
+to say "never blocked", which is exactly the failure this head exists to prevent.
+
+What it does show: the label, the head, the loss, the metrics and the follower's gate all work
+end to end. What it needs: the full dataset, and ideally real obstacle annotation rather than a
+braking proxy.
+
+Until then no shipped checkpoint has the head, so `p` is `None` and the gate never brakes.
+
 ## Roadmap
-- Edge/obstacle stop: add a "no drivable surface ahead" head → force linear→0.
+- Train the stop head on the full dataset; treat the numbers above as a floor, not a result.
 - Recovery: on repeated low-confidence frames, back up + re-scan (ties to the SDK
   interventions API).
 - Off-road / Indoor tracks: image-goal policy (no GPS) — same backbone, goal-image input.
