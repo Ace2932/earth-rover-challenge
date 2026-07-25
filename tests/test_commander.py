@@ -148,7 +148,7 @@ def test_run_closes_the_io_so_the_hardened_stop_runs():
         closed = False
 
         def waypoints(self, route_file):
-            return [(37.8719, -122.2585)]
+            return [(37.8719, -122.2585)], 0
 
         def get_pose(self):
             return 37.8719, -122.2585, 0.0
@@ -184,7 +184,7 @@ def test_the_control_loop_holds_its_rate_rather_than_sleeping_a_fixed_period():
             self.steps = 0
 
         def waypoints(self, route_file):
-            return [(37.9, -122.2)]                 # far away, never reached
+            return [(37.9, -122.2)], 0              # far away, never reached
 
         def get_pose(self):
             self.steps += 1
