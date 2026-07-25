@@ -199,10 +199,13 @@ def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
 
 def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     wps = io.waypoints(route_file)
+    # #19 changes this contract to (waypoints, start_index). Accept both while
+    # the branches are in flight, so merge order cannot break the loop.
+    wps, start = wps if isinstance(wps, tuple) else (wps, 0)
     print(f"[follower] {len(wps)} waypoints")
     is_mock = isinstance(io, MockIO)
     period = 1.0 / cfg.loop_hz
-    i, step = 0, 0
+    i, step = start, 0
     prev_ang = 0.0
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()

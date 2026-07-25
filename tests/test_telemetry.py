@@ -130,7 +130,7 @@ class FlatBatteryIO:
         self.last_data = data(battery=5.0)
 
     def waypoints(self, route_file):
-        return [(37.8719 + 500 / M_PER_DEG, -122.2585)]
+        return [(37.8719 + 500 / M_PER_DEG, -122.2585)], 0
 
     def get_pose(self):
         return 37.8719, -122.2585, 0.0
