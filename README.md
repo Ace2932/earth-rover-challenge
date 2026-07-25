@@ -44,7 +44,11 @@ Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
 - **Heading fusion:** uses GPS course-over-ground when moving (drift-free, no calibration)
   and the magnetometer only when too slow — so a bad `orientation` calibration can't ruin a run.
 - **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
-- **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
+- **Stuck recovery (`recovery.py`):** no progress for `STUCK_S` no longer ends the run. The
+  ladder is: back up and turn (`RECOVERY_TRIES` attempts, alternating direction) → approach the
+  checkpoint from `RECOVERY_OFFSET_M` to the side → only then record an intervention via
+  `/interventions/start` and stop. The detour point is deliberately **not** a checkpoint, so it
+  is never claimed as one.
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 
 Both quick-start commands end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON

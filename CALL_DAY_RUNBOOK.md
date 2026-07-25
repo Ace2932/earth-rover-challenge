@@ -47,6 +47,12 @@ SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py   # 3/3
 - Chrome errors → fix `CHROME_EXECUTABLE_PATH`; SDK needs Chrome 143+.
 - Follower turns in place forever → heading sign/offset wrong → redo calibration + sign check.
 - Overshoots checkpoints → lower `CRUISE`, raise `KP_ANG`, or widen `CHECKPOINT_RADIUS_M`.
+- Rover wedged on a curb → it now backs up and turns by itself (up to `RECOVERY_TRIES`), then
+  tries approaching from `RECOVERY_OFFSET_M` to the side. Watch for
+  `recording an intervention and stopping` — that is the point a human is needed.
+- **Keep clearance behind the rover.** Recovery reverses at `RECOVERY_REVERSE_THROTTLE` for
+  `RECOVERY_REVERSE_S` with no rear obstacle sensing (there is a rear camera; nothing reads it
+  yet). Set `RECOVERY_REVERSE_S=0` to disable reversing if the site is tight.
 
 ## After the baseline drives
 Camera sidewalk-keeping (Urban) trained on FrodoBots-2K / Berkeley-FrodoBots-7K — the piece
