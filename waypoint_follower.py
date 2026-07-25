@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 
 from geo import haversine_m, bearing_deg, wrap180
+from rover_client import server_distance
 
 
 def clamp(v, lo, hi):
@@ -33,7 +34,11 @@ def clamp(v, lo, hi):
 
 @dataclass
 class Config:
-    checkpoint_radius_m: float = 5.0   # gate to start asking the server "reached?"
+    # The challenge accepts a checkpoint within 15 m and the server tells us its own
+    # distance, so ask early and often rather than waiting for our own fix to agree.
+    checkpoint_radius_m: float = 20.0  # start asking the server "reached?" inside this
+    checkpoint_poll_s: float = 1.0     # how often to ask while inside it
+    server_dist_max_age_s: float = 3.0 # after this, fall back to our own haversine
     cruise: float = 0.6                # forward throttle when aligned, 0..1
     kp_ang: float = 1.5                # steering gain (full turn near 45deg err)
     align_deg: float = 20.0            # within this err -> full cruise
@@ -97,7 +102,7 @@ class HeadingEstimator:
 
 
 class RunLogger:
-    COLS = "t,wp,lat,lon,heading,hsrc,dist,bearing,err,linear,angular"
+    COLS = "t,wp,lat,lon,heading,hsrc,dist,sdist,bearing,err,linear,angular"
 
     def __init__(self, path):
         self.f = open(path, "w")
@@ -196,6 +201,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
     last_reach_try = 0.0
+    sdist, sdist_t = None, 0.0        # the server's own distance, and when it said so
     try:
         while i < len(wps):
             now = time.time()
@@ -206,16 +212,12 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             dist = haversine_m(lat, lon, tlat, tlon)
             brg = bearing_deg(lat, lon, tlat, tlon)
 
-            # stuck detection (per waypoint)
-            if dist < best_dist - 0.5:
-                best_dist, t_best = dist, now
-            elif now - t_best > cfg.stuck_s:
-                print(f"[follower] STUCK on wp {i+1} ({dist:.1f}m, no progress {cfg.stuck_s}s)")
-                break
-
-            # server-authoritative checkpoint (rate-limited on the real bot to avoid
-            # spamming the API; unthrottled in the mock, whose loop has no sleep)
-            if dist < cfg.checkpoint_radius_m and (is_mock or now - last_reach_try > 0.8):
+            # server-authoritative checkpoint. Ask well before our own fix agrees we
+            # have arrived: the acceptance radius is the SERVER's, not ours, and its
+            # refusal carries the distance it measured. Rate-limited so we do not
+            # spam the API (unthrottled in the mock, whose loop has no sleep).
+            if dist < cfg.checkpoint_radius_m and (is_mock or
+                                                   now - last_reach_try > cfg.checkpoint_poll_s):
                 last_reach_try = now
                 ok, detail = io.reached()
                 if ok:
@@ -223,9 +225,27 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     print(f"[follower] reached wp {i+1}/{len(wps)} (dist {dist:.1f}m, step {step})")
                     i += 1
                     prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
+                    sdist, sdist_t = None, 0.0
                     continue
+                d = server_distance(detail)
+                if d is not None:
+                    sdist, sdist_t = d, now
 
-            linear, angular, err = steer(dist, brg, heading, cfg)
+            # Navigate on the server's distance while it is fresh — it is the number
+            # that decides whether the checkpoint counts. Bearing still comes from our
+            # own fix; the server only tells us how far, never which way.
+            fresh = sdist is not None and now - sdist_t < cfg.server_dist_max_age_s
+            nav_dist = sdist if fresh else dist
+
+            # stuck detection (per waypoint), measured the same way
+            if nav_dist < best_dist - 0.5:
+                best_dist, t_best = nav_dist, now
+            elif now - t_best > cfg.stuck_s:
+                print(f"[follower] STUCK on wp {i+1} ({nav_dist:.1f}m, "
+                      f"no progress {cfg.stuck_s}s)")
+                break
+
+            linear, angular, err = steer(nav_dist, brg, heading, cfg)
             if vision_fn is not None:
                 vf = io.front_frame()
                 if vf is not None:
@@ -238,11 +258,12 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
 
             if logger:
                 logger.row(t=now - t0, wp=i + 1, lat=lat, lon=lon, heading=heading,
-                           hsrc=io.hsrc, dist=dist, bearing=brg, err=err,
-                           linear=linear, angular=angular)
+                           hsrc=io.hsrc, dist=dist, sdist=("" if sdist is None else sdist),
+                           bearing=brg, err=err, linear=linear, angular=angular)
             if step % max(1, int(cfg.loop_hz)) == 0:
-                print(f"  wp{i+1} dist={dist:6.1f}m brg={brg:5.1f} hdg={heading:5.1f}[{io.hsrc}] "
-                      f"err={err:+6.1f} lin={linear:+.2f} ang={angular:+.2f}")
+                sd = f" srv={sdist:5.1f}m" if fresh else ""
+                print(f"  wp{i+1} dist={dist:6.1f}m{sd} brg={brg:5.1f} hdg={heading:5.1f}"
+                      f"[{io.hsrc}] err={err:+6.1f} lin={linear:+.2f} ang={angular:+.2f}")
             step += 1
             if not is_mock:
                 time.sleep(period)

@@ -43,7 +43,10 @@ Run the tests: `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q`
   injected fault rate); on total failure the loop stops the rover rather than driving blind.
 - **Heading fusion:** uses GPS course-over-ground when moving (drift-free, no calibration)
   and the magnetometer only when too slow — so a bad `orientation` calibration can't ruin a run.
-- **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
+- **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200 —
+  and starts asking at `CHECKPOINT_RADIUS_M` (20 m), because the acceptance tolerance is the
+  server's (15 m), not ours. Its refusal carries `proximate_distance_to_checkpoint`, which the
+  loop then navigates and measures progress on, and logs as `sdist`.
 - **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 

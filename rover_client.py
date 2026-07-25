@@ -29,6 +29,27 @@ def _clamp(v, lo=-1.0, hi=1.0):
     return max(lo, min(hi, float(v)))
 
 
+def server_distance(detail):
+    """Metres to the current checkpoint per the SERVER, from a `checkpoint_reached`
+    payload, or None if it does not carry one.
+
+    The SDK answers a refusal with FastAPI's envelope around its own error object:
+        {"detail": {"error": "Bot is not within 15 meters from the checkpoint",
+                    "proximate_distance_to_checkpoint": 12.5}}
+    This is the authoritative answer to "would this count", so it is worth far more
+    than our own haversine — and it was being thrown away.
+    """
+    if not isinstance(detail, dict):
+        return None
+    inner = detail.get("detail")
+    if not isinstance(inner, dict):
+        return None
+    try:
+        return float(inner["proximate_distance_to_checkpoint"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 class RoverClient:
     def __init__(self, base_url="http://localhost:8000", timeout=5.0,
                  retries=3, backoff=0.3):
