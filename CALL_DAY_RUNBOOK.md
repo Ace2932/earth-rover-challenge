@@ -43,6 +43,10 @@ SDK_BASE_URL=http://localhost:8777 .venv/bin/python waypoint_follower.py   # 3/3
 
 ## Troubleshooting
 - `Bot unavailable for SDK` → bot not assigned / another session holds it; check allocation.
+  The follower now aborts with `cannot start: /start-mission refused: ...` (exit 2) instead
+  of pretending the run completed.
+- Follower crashed mid-mission → just restart it. It reads `latest_scanned_checkpoint` and
+  picks up at the next checkpoint (`resuming: server reports N/M already reached`).
 - No GPS / `orientation` weird → confirm bot is outdoors with signal; re-run calibration.
 - **Check what `gps_signal` actually means** on the first live run: `curl -s localhost:8000/data`
   outdoors vs. beside a building. The guards assume higher = better on a 0..31-ish scale. If it
