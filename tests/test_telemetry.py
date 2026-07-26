@@ -25,7 +25,7 @@ def cfg(**kw):
 def data(**kw):
     d = {"battery": 88.0, "signal_level": 5, "gps_signal": 31.0, "speed": 0.9,
          "rpms": [[100, 100, 100, 100]], "latitude": 37.8719, "longitude": -122.2585,
-         "orientation": 0}
+         "orientation": 0, "timestamp": 1000.0}   # real payloads carry one
     d.update(kw)
     return d
 
@@ -166,3 +166,62 @@ def test_the_loop_scales_speed_down_on_poor_gps():
     run(poor, c)
     assert max(l for l, _ in poor.commands) < max(l for l, _ in good.commands)
 
+
+
+# ---------------- a frozen position fix (issue #59) ----------------
+
+def test_an_advancing_timestamp_is_fresh():
+    g = Guard(cfg(fix_max_age_s=2.0))
+    for k in range(5):
+        v = g.check(data(timestamp=1000.0 + k), cmd_linear=0.6, now=1000.0 + k)
+    assert v.stale_fix is False
+
+
+def test_a_frozen_timestamp_eventually_reads_as_stale():
+    """The SDK serves /data from a value cached in the browser page. If RTM stalls it
+    keeps returning 200 with the last payload — position, speed, timestamp and all."""
+    g = Guard(cfg(fix_max_age_s=2.0))
+    g.check(data(timestamp=1000.0), cmd_linear=0.6, now=1000.0)
+    v = g.check(data(timestamp=1000.0), cmd_linear=0.6, now=1001.0)
+    assert v.stale_fix is False                     # not yet
+    v = g.check(data(timestamp=1000.0), cmd_linear=0.6, now=1004.0)
+    assert v.stale_fix is True
+
+
+def test_staleness_is_measured_by_advancement_not_against_our_clock():
+    """The bot's clock, the SDK host's and ours need not agree. A timestamp far from
+    our `now` is fine as long as it keeps moving."""
+    g = Guard(cfg(fix_max_age_s=2.0))
+    for k in range(6):
+        v = g.check(data(timestamp=5_000_000.0 + k), cmd_linear=0.6, now=1000.0 + k)
+    assert v.stale_fix is False
+
+
+def test_a_recovered_timestamp_clears_the_staleness():
+    g = Guard(cfg(fix_max_age_s=2.0))
+    g.check(data(timestamp=1000.0), cmd_linear=0.6, now=1000.0)
+    assert g.check(data(timestamp=1000.0), cmd_linear=0.6, now=1004.0).stale_fix is True
+    assert g.check(data(timestamp=1004.5), cmd_linear=0.6, now=1004.5).stale_fix is False
+
+
+def test_a_payload_without_a_timestamp_is_never_stale():
+    """We cannot tell, and refusing to drive would be worse than driving."""
+    d = data()
+    del d["timestamp"]
+    g = Guard(cfg(fix_max_age_s=2.0))
+    g.check(d, cmd_linear=0.6, now=1000.0)
+    assert g.check(d, cmd_linear=0.6, now=1099.0).stale_fix is False
+
+
+def test_the_loop_stops_driving_on_a_frozen_fix():
+    """A frozen fix must not produce 20 s of blind driving followed by a recovery
+    ladder planned against a position that is no longer real."""
+    class FrozenIO(FlatBatteryIO):
+        def __init__(self):
+            super().__init__()
+            self.last_data = data(timestamp=1000.0)     # never advances
+
+    io = FrozenIO()
+    run(io, cfg(fix_max_age_s=0.3, max_consecutive_errors=5, max_runtime_s=4.0))
+    assert io.commands[-1] == (0, 0)
+    assert len(io.commands) < 30, "kept driving on a fix that stopped updating"

@@ -16,6 +16,7 @@ class Verdict:
     speed_scale: float = 1.0        # multiply the commanded throttle by this
     abort: str = None               # non-None -> stop the run, with this reason
     no_motion: bool = False         # commanded to move, wheels say otherwise
+    stale_fix: bool = False         # /data stopped updating; the position is fiction
     warnings: list = field(default_factory=list)
 
 
@@ -43,6 +44,8 @@ class Guard:
     def __init__(self, cfg):
         self.cfg = cfg
         self.moving_since = None     # last time we saw real motion
+        self.last_ts = None          # last /data timestamp we saw
+        self.last_ts_change = None   # when it last changed, by OUR clock
         self.warned = set()
 
     def _once(self, key, message, verdict):
@@ -82,6 +85,21 @@ class Guard:
                 span = c.gps_signal_good - c.gps_signal_poor
                 frac = (gps - c.gps_signal_poor) / span
                 v.speed_scale = c.min_speed_scale + frac * (1.0 - c.min_speed_scale)
+
+        # Is the position fix still alive? The SDK serves /data from a value cached
+        # in the browser page and updated by incoming RTM messages, so a stalled link
+        # keeps returning 200 with the last payload — position, speed and all. Judge
+        # it by ADVANCEMENT rather than against our own clock: the bot's clock, the
+        # SDK host's and ours need not agree, but a live fix keeps moving.
+        ts = _num(data, "timestamp")
+        if ts is None:
+            self.last_ts, self.last_ts_change = None, None   # cannot tell; never stale
+        else:
+            if ts != self.last_ts:
+                self.last_ts, self.last_ts_change = ts, now
+            elif now - self.last_ts_change > c.fix_max_age_s:
+                v.stale_fix = True
+                self._once("fix", "position fix has stopped updating", v)
 
         if abs(cmd_linear) < 0.05:
             self.moving_since = now          # not asked to move; nothing to check
