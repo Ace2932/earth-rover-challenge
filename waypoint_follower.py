@@ -31,6 +31,7 @@ from envcfg import coerce
 from geo import haversine_m, bearing_deg, wrap180
 from heading import HeadingEstimator
 from recovery import Recovery
+from rover_client import server_distance
 
 
 def clamp(v, lo, hi):
@@ -43,7 +44,11 @@ class MissionUnavailable(RuntimeError):
 
 @dataclass
 class Config:
-    checkpoint_radius_m: float = 5.0   # gate to start asking the server "reached?"
+    # The challenge accepts a checkpoint within 15 m and the server tells us its own
+    # distance, so ask early and often rather than waiting for our own fix to agree.
+    checkpoint_radius_m: float = 20.0  # start asking the server "reached?" inside this
+    checkpoint_poll_s: float = 1.0     # how often to ask while inside it
+    server_dist_max_age_s: float = 3.0 # after this, fall back to our own haversine
     cruise: float = 0.6                # forward throttle when aligned, 0..1
     kp_ang: float = 1.5                # steering gain (full turn near 45deg err)
     align_deg: float = 20.0            # within this err -> full cruise
@@ -125,7 +130,7 @@ def steer(dist, bearing, heading, cfg):
 
 
 class RunLogger:
-    COLS = "t,wp,lat,lon,heading,hsrc,dist,bearing,err,linear,angular"
+    COLS = "t,wp,lat,lon,heading,hsrc,dist,sdist,bearing,err,linear,angular"
 
     def __init__(self, path):
         self.f = open(path, "w")
@@ -293,6 +298,22 @@ def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
     return max(0.0, min(gps_lin, vis_lin)), clamp(alpha * gps_ang + (1 - alpha) * vis_ang, -1, 1)
 
 
+def server_distance_usable(detour, sdist, sdist_age_s, cfg):
+    """May we navigate and measure progress on the server's distance right now?
+
+    Only when it is fresh AND we are actually heading for the checkpoint it
+    describes. While detouring we are deliberately driving away from that checkpoint
+    to get around an obstacle, so its distance is the wrong yardstick: a
+    correctly-executing detour would look like zero progress and re-trip stuck
+    detection within seconds (#31).
+    """
+    if detour is not None:
+        return False
+    if sdist is None:
+        return False
+    return sdist_age_s < cfg.server_dist_max_age_s
+
+
 def _intervene(io, action):
     """Record a human takeover. Best-effort: it is bookkeeping, not control, and a
     failure here must never stop us from stopping the rover."""
@@ -336,6 +357,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
     last_reach_try = 0.0
+    sdist, sdist_t = None, 0.0        # the server's own distance, and when it said so
     rec = Recovery(cfg)
     detour = None                 # (lat, lon, deadline) — a waypoint, NOT a checkpoint
     gave_up = False
@@ -379,17 +401,55 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 print("[follower] detour reached — approaching the checkpoint again")
                 detour = None
                 best_dist, t_best = math.inf, now
+                sdist, sdist_t = None, 0.0         # target changed; ask again
 
             tlat, tlon = detour[:2] if detour else wps[i]
             tlat, tlon = wps[i]
             dist = haversine_m(lat, lon, tlat, tlon)
             brg = bearing_deg(lat, lon, tlat, tlon)
 
-            # stuck detection (per waypoint)
-            if dist < best_dist - 0.5:
-                best_dist, t_best = dist, now
+            # Ask the server first, so its distance is available to everything below.
+            # It decides whether the checkpoint counts, and its refusal carries the
+            # distance it measured. Rate-limited so we do not spam the API (unthrottled
+            # in the mock, whose loop has no sleep). Never asked while on a detour —
+            # the detour point is not a checkpoint, and claiming it would be a lie.
+            if not detour and dist < cfg.checkpoint_radius_m and (
+                    is_mock or now - last_reach_try > cfg.checkpoint_poll_s):
+                last_reach_try = now
+                ok, detail = io.reached()
+                if ok:
+                    # Retried and swallowed: a dropped stop command must not cost us a
+                    # checkpoint the server has already confirmed (#48). The next
+                    # iteration commands again regardless.
+                    safe_stop(io, cfg)
+                    print(f"[follower] reached wp {i+1}/{len(wps)} (dist {dist:.1f}m, step {step})")
+                    i += 1
+                    prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
+                    sdist, sdist_t = None, 0.0
+                    rec = Recovery(cfg)          # fresh budget for the next leg
+                    detour = None
+                    continue
+                d = server_distance(detail)
+                if d is not None:
+                    sdist, sdist_t = d, now
+
+            # Navigate on the server's distance while it is fresh — it is the number
+            # that decides whether the checkpoint counts. Bearing still comes from our
+            # own fix; the server only tells us how far, never which way.
+            #
+            # NOT while detouring (#31): that distance is to the CHECKPOINT, but we are
+            # deliberately driving away from it to get around an obstacle. Measuring
+            # progress against it would make a correctly-executing detour look like no
+            # progress at all and re-trip stuck detection within seconds.
+            fresh = server_distance_usable(detour, sdist, now - sdist_t, cfg)
+            nav_dist = sdist if fresh else dist
+
+            # stuck detection (per waypoint), measured the same way
+            if nav_dist < best_dist - 0.5:
+                best_dist, t_best = nav_dist, now
             elif now - t_best > cfg.stuck_s:
-                print(f"[follower] STUCK on wp {i+1} ({dist:.1f}m, no progress {cfg.stuck_s}s)")
+                print(f"[follower] STUCK on wp {i+1} ({nav_dist:.1f}m, "
+                      f"no progress {cfg.stuck_s}s)")
                 if not rec.exhausted:
                     rec.begin(now)
                     print(f"[follower] recovery attempt {rec.attempts}/{cfg.recovery_tries}: "
@@ -406,6 +466,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     print(f"[follower] recovery exhausted — detouring "
                           f"{cfg.recovery_offset_m:.0f}m to the side of wp {i+1}")
                     best_dist, t_best = math.inf, now
+                    sdist, sdist_t = None, 0.0     # stale the moment the target changes
                     continue
                 print(f"[follower] cannot free the rover on wp {i+1} — recording an "
                       f"intervention and stopping")
@@ -413,26 +474,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 gave_up = True
                 break
 
-            # server-authoritative checkpoint (rate-limited on the real bot to avoid
-            # spamming the API; unthrottled in the mock, whose loop has no sleep).
-            # Never asked while on a detour: the detour point is not a checkpoint.
-            if not detour and dist < cfg.checkpoint_radius_m and (
-                    is_mock or now - last_reach_try > 0.8):
-                last_reach_try = now
-                ok, detail = io.reached()
-                if ok:
-                    # Retried and swallowed: a dropped stop command must not cost us a
-                    # checkpoint the server has already confirmed (#48). The next
-                    # iteration commands again regardless.
-                    safe_stop(io, cfg)
-                    print(f"[follower] reached wp {i+1}/{len(wps)} (dist {dist:.1f}m, step {step})")
-                    i += 1
-                    prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
-                    rec = Recovery(cfg)          # fresh budget for the next leg
-                    detour = None
-                    continue
-
-            linear, angular, err = steer(dist, brg, heading, cfg)
+            linear, angular, err = steer(nav_dist, brg, heading, cfg)
             if vision_fn is not None:
                 vf = io.front_frame()
                 if vf is not None:
@@ -452,11 +494,12 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
 
             if logger:
                 logger.row(t=now - t0, wp=i + 1, lat=lat, lon=lon, heading=heading,
-                           hsrc=io.hsrc, dist=dist, bearing=brg, err=err,
-                           linear=linear, angular=angular)
+                           hsrc=io.hsrc, dist=dist, sdist=("" if sdist is None else sdist),
+                           bearing=brg, err=err, linear=linear, angular=angular)
             if step % max(1, int(cfg.loop_hz)) == 0:
-                print(f"  wp{i+1} dist={dist:6.1f}m brg={brg:5.1f} hdg={heading:5.1f}[{io.hsrc}] "
-                      f"err={err:+6.1f} lin={linear:+.2f} ang={angular:+.2f}")
+                sd = f" srv={sdist:5.1f}m" if fresh else ""
+                print(f"  wp{i+1} dist={dist:6.1f}m{sd} brg={brg:5.1f} hdg={heading:5.1f}"
+                      f"[{io.hsrc}] err={err:+6.1f} lin={linear:+.2f} ang={angular:+.2f}")
             step += 1
             if not is_mock:
                 # Hold the loop rate: sleeping a fixed period AFTER the work makes the

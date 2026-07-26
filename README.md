@@ -82,7 +82,11 @@ The fake server reproduces the SDK's real responses, including the `400` with
   seeds the filter once and is never read again. Under sigma=1.5 m GPS noise this holds
   ~2 deg median heading error; taking the course over a short baseline (the previous design)
   gave ~88 deg and preferred it over the magnetometer 93% of the time.
-- **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
+- **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200 —
+  and starts asking at `CHECKPOINT_RADIUS_M` (20 m), because the acceptance tolerance is the
+  server's (15 m), not ours. Its refusal carries `proximate_distance_to_checkpoint`, which the
+  loop then navigates and measures progress on, and logs as `sdist` — except while detouring,
+  when that distance is to the checkpoint rather than to where we are driving.
 - **Stuck recovery (`recovery.py`):** no progress for `STUCK_S` no longer ends the run. The
   ladder is: back up and turn (`RECOVERY_TRIES` attempts, alternating direction) → approach the
   checkpoint from `RECOVERY_OFFSET_M` to the side → only then record an intervention via

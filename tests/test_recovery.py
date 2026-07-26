@@ -9,7 +9,7 @@ approach the checkpoint from a different angle -> only then record an
 intervention and stop.
 """
 from recovery import Recovery
-from waypoint_follower import Config, run
+from waypoint_follower import Config, run, server_distance_usable
 
 M_PER_DEG = 111111.0
 
@@ -170,3 +170,25 @@ def test_the_detour_waypoint_is_never_claimed_as_a_checkpoint():
     assert commands_after_last_poll > 20, (
         f"only {commands_after_last_poll} commands after the last poll — the detour "
         f"phase looks like it kept claiming the checkpoint")
+
+
+# ---------------- the detour must not be judged by the checkpoint's distance (#31) ----------------
+
+def test_the_server_distance_is_usable_when_heading_for_the_checkpoint():
+    assert server_distance_usable(None, 12.0, 0.5, cfg()) is True
+
+
+def test_the_server_distance_is_not_usable_while_detouring():
+    """It is the distance to the CHECKPOINT. While detouring we are deliberately
+    driving away from that checkpoint, so measuring progress against it makes a
+    working detour look like no progress and re-trips stuck detection in seconds."""
+    detour = (37.8720, -122.2585, 9e9)
+    assert server_distance_usable(detour, 12.0, 0.5, cfg()) is False
+
+
+def test_a_stale_server_distance_is_not_usable():
+    assert server_distance_usable(None, 12.0, 99.0, cfg()) is False
+
+
+def test_no_server_distance_is_not_usable():
+    assert server_distance_usable(None, None, 0.0, cfg()) is False
