@@ -121,6 +121,37 @@ class Config:
     heading_offset: float = 0.0
     heading_sign: float = 1.0
 
+    # Ranges that a working mission requires. The runbook has you hand-editing .env
+    # during live bring-up, and a stray minus sign or a zero meaning "off" is silently
+    # accepted otherwise: CRUISE=-1 drives backwards at full throttle for the whole
+    # mission, CHECKPOINT_RADIUS_M=0 never claims a checkpoint (#64).
+    POSITIVE = ("loop_hz", "command_hz", "stuck_s", "max_runtime_s", "checkpoint_radius_m",
+                "heading_min_move_m", "yaw_rate_dps", "max_speed_mps", "approach_m",
+                "max_consecutive_errors", "stop_attempts", "recovery_tries")
+    NON_NEGATIVE = ("checkpoint_poll_s", "server_dist_max_age_s", "deadband_deg",
+                    "align_deg", "kp_ang", "max_dang", "setpoint_stale_s",
+                    "control_timeout_s", "data_timeout_s", "fix_max_age_s",
+                    "no_motion_s", "frame_max_age_s", "recovery_offset_m",
+                    "detour_radius_m", "detour_timeout_s", "blocked_frames",
+                    "blocked_hold_s", "heading_max_turn_deg", "heading_max_blind_s")
+    UNIT_RANGE = ("cruise", "min_creep", "min_speed_scale", "vision_alpha",
+                  "vision_min_linear", "blocked_p", "heading_gain", "recovery_yaw",
+                  "recovery_reverse_throttle", "heading_slip_ratio")
+
+    def validate(self):
+        """Fail loudly at startup rather than driving under a config nobody checked."""
+        for f in self.POSITIVE:
+            if getattr(self, f, 1) <= 0:
+                raise ValueError(f"{f.upper()} must be > 0, got {getattr(self, f)}")
+        for f in self.NON_NEGATIVE:
+            if getattr(self, f, 0) < 0:
+                raise ValueError(f"{f.upper()} must be >= 0, got {getattr(self, f)}")
+        for f in self.UNIT_RANGE:
+            v = getattr(self, f, 0)
+            if not 0.0 <= v <= 1.0:
+                raise ValueError(f"{f.upper()} must be between 0 and 1, got {v}")
+        return self
+
     @classmethod
     def from_env(cls):
         """Every field is overridable by its UPPERCASE name. See envcfg.coerce for
@@ -134,7 +165,7 @@ class Config:
                 setattr(c, f, coerce(getattr(c, f), env))
             except ValueError as e:
                 raise ValueError(f"{f.upper()}: {e}") from None
-        return c
+        return c.validate()
 
 
 def steer(dist, bearing, heading, cfg):
@@ -156,7 +187,10 @@ class RunLogger:
     COLS = "t,wp,lat,lon,heading,hsrc,dist,sdist,bearing,err,linear,angular"
 
     def __init__(self, path):
-        self.f = open(path, "w")
+        # Line-buffered: the log exists for post-mortem, and the failures worth
+        # investigating are the ones that skip close() — kill -9, OOM, a suspended
+        # machine. An unflushed log is empty in exactly those cases (#63).
+        self.f = open(path, "w", buffering=1)
         self.f.write(self.COLS + "\n")
 
     def row(self, **k):
@@ -329,6 +363,13 @@ class MockIO:
         self.control(0, 0)
 
     def waypoints(self, route_file):
+        # Honour --route here too: checking a route offline before driving it is
+        # exactly what the mock is for, and silently substituting a canned square
+        # tells you nothing about the route you asked about (#65).
+        if route_file:
+            with open(route_file) as f:
+                pts = json.load(f)
+            return [(float(p["latitude"]), float(p["longitude"])) for p in pts], 0
         b = (self.lat, self.lon)
         return [(b[0] + 0.0002, b[1] + 0.0001),
                 (b[0] + 0.0003, b[1] + 0.0004),
@@ -767,7 +808,13 @@ def main():
         print(missing_checkpoint_help(args.vision))
         return
 
-    cfg = Config.from_env()
+    try:
+        cfg = Config.from_env()
+    except ValueError as e:
+        # A traceback is the wrong thing to hand someone standing next to a rover.
+        print(f"[follower] bad configuration: {e}\n"
+              f"  check your .env / exported vars against .env.example")
+        raise SystemExit(2)
     # Load the policy BEFORE spawning the watchdog: a missing torch used to be able
     # to return from main() with a watchdog subprocess already running, orphaning a
     # process that holds the bot's only SDK session.
