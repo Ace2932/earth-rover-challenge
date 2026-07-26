@@ -33,6 +33,7 @@ from geo import haversine_m, bearing_deg, wrap180
 from heading import HeadingEstimator
 from recovery import Recovery
 from rover_client import server_distance
+from telemetry import Guard
 
 
 def clamp(v, lo, hi):
@@ -65,6 +66,14 @@ class Config:
     blocked_p: float = 0.8             # probability to call the path blocked; 1.0 = off
     blocked_frames: int = 2            # consecutive frames before braking
     blocked_hold_s: float = 1.5        # hold the stop this long (anti-chatter)
+    # --- telemetry guards (see telemetry.py) ---
+    battery_abort_pct: float = 15.0    # park rather than die somewhere inconvenient
+    battery_warn_pct: float = 30.0
+    gps_signal_good: float = 20.0      # units undocumented; good == poor disables this
+    gps_signal_poor: float = 5.0
+    min_speed_scale: float = 0.3       # slowest we will crawl on a bad fix
+    no_motion_s: float = 4.0           # commanded to move this long with no wheel motion
+
     # --- vision fusion (only used with --vision) ---
     vision_alpha: float = 0.5          # weight on VISION steering (0 = pure GPS)
     vision_max_err_deg: float = 30.0   # above this the GPS controller is turning in
@@ -182,10 +191,12 @@ class LiveIO:
                              heartbeat_path=heartbeat_path)
         self.h = HeadingEstimator(cfg)
         self.hsrc = "mag"
+        self.last_data = None
         self.last_cmd = (0.0, 0.0)      # what the estimator assumes is in force
 
     def get_pose(self):
         d = self.c.get_data()
+        self.last_data = d          # the guards read the rest of the payload
         lat, lon = float(d["latitude"]), float(d["longitude"])
         speed = d.get("speed")
         heading, self.hsrc = self.h.update(
@@ -415,6 +426,10 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     last_reach_try = 0.0
     blocked_gate = BlockedGate(cfg)
     blocked_now = False
+    guard = Guard(cfg)
+    prev_lin = 0.0
+    warned_no_motion = False
+    aborted = False
     sdist, sdist_t = None, 0.0        # the server's own distance, and when it said so
     rec = Recovery(cfg)
     detour = None                 # (lat, lon, deadline) — a waypoint, NOT a checkpoint
@@ -491,6 +506,21 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 if d is not None:
                     sdist, sdist_t = d, now
 
+            # Telemetry guards: battery floor, GPS-quality speed scaling, and a
+            # commanded-vs-actual motion check that notices a rover going nowhere
+            # well before STUCK_S does.
+            verdict = guard.check(getattr(io, "last_data", None), prev_lin, now)
+            for w in verdict.warnings:
+                print(f"[follower] WARNING: {w}")
+            if verdict.abort:
+                print(f"[follower] ABORT: {verdict.abort}")
+                aborted = True
+                break
+            if verdict.no_motion and not warned_no_motion:
+                warned_no_motion = True
+                print("[follower] commanded to move but no wheel motion — dropped "
+                      "command, or the rover is held up on something")
+
             # Navigate on the server's distance while it is fresh — it is the number
             # that decides whether the checkpoint counts. Bearing still comes from our
             # own fix; the server only tells us how far, never which way.
@@ -533,6 +563,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 break
 
             linear, angular, err = steer(nav_dist, brg, heading, cfg)
+            linear *= verdict.speed_scale
             if vision_fn is not None:
                 vf, vts = io.front_frame()
                 if vf is None:
@@ -568,7 +599,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                         blocked_now = False
                         print("[follower] path clear — resuming")
             angular = clamp(angular, prev_ang - cfg.max_dang, prev_ang + cfg.max_dang)  # slew
-            prev_ang = angular
+            prev_ang, prev_lin = angular, linear
             try:
                 io.control(linear, angular)
                 errors = 0                      # a full clean step
@@ -615,9 +646,9 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
 
         if logger:
             logger.close()
-    # Giving up after the recovery ladder is not a completed mission, and an empty
-    # route was never a mission at all.
-    done = bool(wps) and i >= len(wps) and not gave_up
+    # Neither a telemetry abort (flat battery) nor giving up after the recovery
+    # ladder is a completed mission, and an empty route was never a mission at all.
+    done = bool(wps) and i >= len(wps) and not aborted and not gave_up
     print(f"[follower] {'COMPLETE' if done else 'STOPPED'} — {i}/{len(wps)} waypoints, {step} steps")
     return done
 
