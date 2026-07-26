@@ -280,3 +280,47 @@ def test_yaw_noise_is_deterministic_for_a_seed():
 
 def wrap(deg):
     return (deg + 180.0) % 360.0 - 180.0
+
+
+# ---------------- multipath jumps (issue #61) ----------------
+
+def test_no_jumps_by_default():
+    s, t = sim_at_start(gps_jump_rate=0.0, seed=1)
+    for _ in range(200):
+        f = s.data()
+        assert offset_m(s, f["latitude"], f["longitude"]) < 0.001
+        t["now"] += 0.2
+
+
+def test_a_jump_moves_the_fix_far_and_holds_it():
+    """Near buildings the fix steps tens of metres and stays there a while."""
+    s, t = sim_at_start(gps_jump_m=30.0, gps_jump_rate=1.0, gps_jump_hold_s=2.0, seed=2)
+    f = s.data()
+    assert offset_m(s, f["latitude"], f["longitude"]) == pytest.approx(30.0, abs=2.0)
+    t["now"] += 0.2
+    f2 = s.data()
+    assert offset_m(s, f2["latitude"], f2["longitude"]) == pytest.approx(30.0, abs=2.0)
+
+
+def test_a_jump_snaps_back_after_the_hold():
+    s, t = sim_at_start(gps_jump_m=30.0, gps_jump_rate=1.0, gps_jump_hold_s=1.0, seed=3)
+    s.data()
+    t["now"] += 5.0
+    s.cfg.gps_jump_rate = 0.0            # no new jump; the old one must have expired
+    f = s.data()
+    assert offset_m(s, f["latitude"], f["longitude"]) < 1.0
+
+
+def test_jumps_are_deterministic_for_a_seed():
+    def run(seed):
+        s, t = sim_at_start(gps_jump_m=25.0, gps_jump_rate=0.3, gps_jump_hold_s=1.0,
+                            seed=seed)
+        out = []
+        for _ in range(30):
+            f = s.data()
+            out.append(round(offset_m(s, f["latitude"], f["longitude"]), 3))
+            t["now"] += 0.2
+        return out
+
+    assert run(9) == run(9)
+    assert run(9) != run(10)

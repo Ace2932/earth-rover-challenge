@@ -60,6 +60,12 @@ class SimConfig:
     gps_sigma_m: float = 0.0            # per-fix white noise
     gps_bias_m: float = 0.0             # slow drift magnitude
     gps_bias_period_s: float = 120.0    # how long the bias takes to rotate once
+    # Multipath: near buildings the fix steps tens of metres and holds there before
+    # snapping back. The Urban track is sidewalks between buildings, so this is the
+    # defining GPS hazard of the course, not an exotic case (#61).
+    gps_jump_m: float = 0.0             # magnitude of a multipath offset
+    gps_jump_rate: float = 0.0          # probability per fix of entering a jump
+    gps_jump_hold_s: float = 3.0        # how long a jump persists
     telemetry_latency_s: float = 0.0
     control_drop_rate: float = 0.0      # fraction of commands the bot never hears
     fail_rate: float = 0.0              # transient 503s on any request
@@ -107,6 +113,8 @@ class Sim:
         self.last_step_t = self.t0
         self.history = [(self.t0, self.true_lat, self.true_lon)]
         self.latest_scanned_checkpoint = 0
+        self.jump_until = None          # when the current multipath jump expires
+        self.jump_offset = (0.0, 0.0)   # its (north, east) offset in metres
 
     # ---------------- physics ----------------
 
@@ -165,11 +173,27 @@ class Sim:
             lat, lon = la, lo
         return lat, lon
 
+    def _multipath(self, now):
+        """An occasional large offset that persists, then snaps back."""
+        if self.jump_until is not None and now < self.jump_until:
+            return self.jump_offset
+        self.jump_until, self.jump_offset = None, (0.0, 0.0)
+        if self.cfg.gps_jump_m and self.cfg.gps_jump_rate:
+            if self.rng.random() < self.cfg.gps_jump_rate:
+                ang = self.rng.uniform(0, 2 * math.pi)
+                self.jump_offset = (self.cfg.gps_jump_m * math.cos(ang),
+                                    self.cfg.gps_jump_m * math.sin(ang))
+                self.jump_until = now + self.cfg.gps_jump_hold_s
+        return self.jump_offset
+
     def _reported(self):
         now = self.clock()
         self._integrate(now)
         lat, lon = self._delayed_position(now)
         dn, de = self._bias(now)
+        jn, je = self._multipath(now)
+        dn += jn
+        de += je
         if self.cfg.gps_sigma_m:
             dn += self.rng.gauss(0.0, self.cfg.gps_sigma_m)
             de += self.rng.gauss(0.0, self.cfg.gps_sigma_m)

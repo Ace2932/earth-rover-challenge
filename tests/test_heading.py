@@ -299,3 +299,42 @@ def test_a_sustained_net_turn_is_still_rejected():
     """Net rotation is what the chord cannot describe, and it must still be caught."""
     fixes, _ = drive_arc(HeadingEstimator(cfg()), turn_dps=60.0, secs=120.0)
     assert fixes == 0
+
+
+# ---------------- multipath jumps (issue #61) ----------------
+
+def drive_with_jump(jump_m, jump_step=45, steps=60, hz=5.0):
+    """Straight north, with one lateral multipath jump on a single sample."""
+    est = HeadingEstimator(cfg())
+    lat, lon, t = 37.8719, -122.2585, 1000.0
+    worst = 0.0
+    for k in range(steps):
+        lat += (0.9 / hz) / M_PER_DEG
+        t += 1.0 / hz
+        j = jump_m if k == jump_step else 0.0
+        h, _ = est.update(lat, lon + (j / M_PER_DEG) / math.cos(math.radians(lat)),
+                          orientation=0, now=t, cmd_linear=0.6, speed=0.9)
+        worst = max(worst, abs(wrap180(h)))
+    return worst
+
+
+def test_a_multipath_jump_cannot_swing_the_heading():
+    """A jump landing on the sample that completes the odometry baseline produces a
+    chord pointing somewhere arbitrary. The slip check only rejects chords that are
+    too SHORT; a jump makes them too LONG, and the rover cannot have travelled
+    further than its wheels turned."""
+    assert drive_with_jump(10.0) < 15.0
+    assert drive_with_jump(30.0) < 15.0
+
+
+def test_a_normal_course_is_still_accepted():
+    """The upper bound must not reject honest chords — odometry under-reports a
+    little, so there has to be headroom."""
+    est = HeadingEstimator(cfg())
+    trk = Track(heading_deg=0.0, sigma=0.5, seed=4)
+    fixes = 0
+    for _ in range(400):
+        lat, lon, t = trk.step()
+        _, src = est.update(lat, lon, orientation=0, now=t, cmd_linear=0.6, speed=0.9)
+        fixes += src == "gps"
+    assert fixes > 5
