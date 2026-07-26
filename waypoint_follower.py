@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from envcfg import coerce
 from geo import haversine_m, bearing_deg, wrap180
 from heading import HeadingEstimator
+from recovery import Recovery
 
 
 def clamp(v, lo, hi):
@@ -54,6 +55,16 @@ class Config:
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
 
+    # --- stuck recovery (see recovery.py) ---
+    recovery_tries: int = 3            # back-up-and-turn attempts before a detour
+    recovery_pause_s: float = 0.4
+    recovery_reverse_s: float = 1.5
+    recovery_reverse_throttle: float = 0.35
+    recovery_yaw_s: float = 1.5
+    recovery_yaw: float = 0.6
+    recovery_offset_m: float = 8.0     # detour: approach from this far to the side
+    detour_radius_m: float = 3.0       # close enough to the detour point
+    detour_timeout_s: float = 45.0     # give up on the detour after this
     # --- command streaming (see commander.py) ---
     command_hz: float = 20.0           # rate the setpoint is re-sent to the bot
     setpoint_stale_s: float = 0.5      # setpoint older than this decays to a stop
@@ -237,6 +248,9 @@ class LiveIO:
     def reached(self):
         return self.c.checkpoint_reached()      # (ok, detail)
 
+    def intervention(self, action):
+        return self.c.intervention(action)
+
 
 # ---------------- mock backend ----------------
 class MockIO:
@@ -279,6 +293,16 @@ def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
     return max(0.0, min(gps_lin, vis_lin)), clamp(alpha * gps_ang + (1 - alpha) * vis_ang, -1, 1)
 
 
+def _intervene(io, action):
+    """Record a human takeover. Best-effort: it is bookkeeping, not control, and a
+    failure here must never stop us from stopping the rover."""
+    fn = getattr(io, "intervention", None)
+    if fn is None:
+        return
+    try:
+        fn(action)
+    except Exception as e:
+        print(f"[follower] intervention {action} failed: {e}")
 def safe_stop(io, cfg):
     """Stop the rover, retrying, swallowing everything.
 
@@ -312,6 +336,9 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
     last_reach_try = 0.0
+    rec = Recovery(cfg)
+    detour = None                 # (lat, lon, deadline) — a waypoint, NOT a checkpoint
+    gave_up = False
     deadline = t0
     errors = 0                      # consecutive failed steps
     try:
@@ -332,6 +359,28 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 if not is_mock:
                     time.sleep(period)
                 continue
+
+            # While recovering, the manoeuvre owns the rover: no steering, no
+            # checkpoint claims, no stuck accounting.
+            if rec.active:
+                rlin, rang, still = rec.step(now)
+                io.control(rlin, rang)
+                if not still:
+                    print(f"[follower] recovery attempt {rec.attempts} done — retrying")
+                    best_dist, t_best, prev_ang = math.inf, now, 0.0
+                step += 1
+                if not is_mock:
+                    deadline = max(deadline + period, time.time() - period)
+                    time.sleep(max(0.0, deadline - time.time()))
+                continue
+
+            if detour and (now > detour[2] or
+                           haversine_m(lat, lon, detour[0], detour[1]) < cfg.detour_radius_m):
+                print("[follower] detour reached — approaching the checkpoint again")
+                detour = None
+                best_dist, t_best = math.inf, now
+
+            tlat, tlon = detour[:2] if detour else wps[i]
             tlat, tlon = wps[i]
             dist = haversine_m(lat, lon, tlat, tlon)
             brg = bearing_deg(lat, lon, tlat, tlon)
@@ -341,11 +390,34 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 best_dist, t_best = dist, now
             elif now - t_best > cfg.stuck_s:
                 print(f"[follower] STUCK on wp {i+1} ({dist:.1f}m, no progress {cfg.stuck_s}s)")
+                if not rec.exhausted:
+                    rec.begin(now)
+                    print(f"[follower] recovery attempt {rec.attempts}/{cfg.recovery_tries}: "
+                          f"backing up and turning")
+                    continue
+                if cfg.recovery_offset_m > 0 and not detour:
+                    # Approach from a different angle: aim at a point beside the
+                    # checkpoint. It is not a checkpoint, so it is never claimed.
+                    side = bearing_deg(lat, lon, *wps[i]) + 90.0
+                    dlat = cfg.recovery_offset_m * math.cos(math.radians(side)) / 111111.0
+                    dlon = (cfg.recovery_offset_m * math.sin(math.radians(side))
+                            / (111111.0 * math.cos(math.radians(lat))))
+                    detour = (wps[i][0] + dlat, wps[i][1] + dlon, now + cfg.detour_timeout_s)
+                    print(f"[follower] recovery exhausted — detouring "
+                          f"{cfg.recovery_offset_m:.0f}m to the side of wp {i+1}")
+                    best_dist, t_best = math.inf, now
+                    continue
+                print(f"[follower] cannot free the rover on wp {i+1} — recording an "
+                      f"intervention and stopping")
+                _intervene(io, "start")
+                gave_up = True
                 break
 
             # server-authoritative checkpoint (rate-limited on the real bot to avoid
-            # spamming the API; unthrottled in the mock, whose loop has no sleep)
-            if dist < cfg.checkpoint_radius_m and (is_mock or now - last_reach_try > 0.8):
+            # spamming the API; unthrottled in the mock, whose loop has no sleep).
+            # Never asked while on a detour: the detour point is not a checkpoint.
+            if not detour and dist < cfg.checkpoint_radius_m and (
+                    is_mock or now - last_reach_try > 0.8):
                 last_reach_try = now
                 ok, detail = io.reached()
                 if ok:
@@ -356,6 +428,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     print(f"[follower] reached wp {i+1}/{len(wps)} (dist {dist:.1f}m, step {step})")
                     i += 1
                     prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
+                    rec = Recovery(cfg)          # fresh budget for the next leg
+                    detour = None
                     continue
 
             linear, angular, err = steer(dist, brg, heading, cfg)
@@ -395,15 +469,26 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
         # confirming speed actually fell to zero); safe_stop covers the rest. Neither
         # may raise here: this is a finally, and raising would mask the real failure
         # AND leave the rover moving.
+        # Always command a stop ourselves first, then let the backend tear down. Do
+        # NOT delegate the stop to close() alone: run() cannot know that a given
+        # backend's close() stops the rover, and a safety path must not rest on that
+        # assumption.
         try:
-            closer = getattr(io, "close", None)
-            closer() if closer else safe_stop(io, cfg)
+            safe_stop(io, cfg)
         except Exception as e:
             print(f"[follower] stop failed: {e}")
+        try:
+            closer = getattr(io, "close", None)
+            if closer:
+                closer()
+        except Exception as e:
+            print(f"[follower] backend close failed: {e}")
 
         if logger:
             logger.close()
-    done = bool(wps) and i >= len(wps)
+    # Giving up after the recovery ladder is not a completed mission, and an empty
+    # route was never a mission at all.
+    done = bool(wps) and i >= len(wps) and not gave_up
     print(f"[follower] {'COMPLETE' if done else 'STOPPED'} — {i}/{len(wps)} waypoints, {step} steps")
     return done
 

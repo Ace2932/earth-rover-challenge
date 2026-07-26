@@ -83,11 +83,15 @@ The fake server reproduces the SDK's real responses, including the `400` with
   ~2 deg median heading error; taking the course over a short baseline (the previous design)
   gave ~88 deg and preferred it over the magnetometer 93% of the time.
 - **Server-authoritative checkpoints:** only advances when `/checkpoint-reached` returns 200.
+- **Stuck recovery (`recovery.py`):** no progress for `STUCK_S` no longer ends the run. The
+  ladder is: back up and turn (`RECOVERY_TRIES` attempts, alternating direction) → approach the
+  checkpoint from `RECOVERY_OFFSET_M` to the side → only then record an intervention via
+  `/interventions/start` and stop. The detour point is deliberately **not** a checkpoint, so it
+  is never claimed as one.
 - **Fails loud, resumes correctly:** a refused `/start-mission` (400 "Bot unavailable for SDK")
   or an empty checkpoint list aborts with `MissionUnavailable` instead of reporting
   `COMPLETE — 0/0`. Checkpoints are ordered by `sequence`, and a restart resumes from the
   server's `latest_scanned_checkpoint` rather than driving the whole route again.
-- **Stuck detection:** no progress for `STUCK_S` → stop (don't loop forever).
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 
 Both quick-start commands end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON

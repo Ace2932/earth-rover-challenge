@@ -99,6 +99,15 @@ class RoverClient:
             detail = {}
         return (r.status_code == 200), detail
 
+    # --- Interventions API ---
+    def intervention(self, action):
+        """Record a human takeover ('start' or 'end'). Best-effort bookkeeping: it is
+        also a tracked metric, so an autonomous run that needed help should say so."""
+        try:
+            return self._req("POST", f"/interventions/{action}").json()
+        except requests.RequestException:
+            return {}
+
     def emergency_abort_lose_all_progress(self, confirm=False):
         """POST /end-mission. The SDK's own words:
 
