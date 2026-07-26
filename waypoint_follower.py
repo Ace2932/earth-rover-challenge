@@ -101,7 +101,8 @@ class Config:
     stop_attempts: int = 10            # tries to get the rover stopped on the way out
     # --- heading estimation (see heading.py) ---
     heading_min_move_m: float = 8.0    # ODOMETRY baseline a course needs to beat the noise
-    heading_max_turn_deg: float = 90.0 # past this a chord tells you nothing about heading
+    heading_max_turn_deg: float = 90.0 # NET turn past this and a chord says nothing
+    heading_max_abs_turn_deg: float = 540.0  # loose sanity bound on total |yaw| (#54)
     heading_max_blind_s: float = 20.0  # no correction for this long -> take the next one anyway
     heading_gain: float = 0.25         # floor on the correction gain (see heading._gain)
     heading_slip_ratio: float = 0.75   # GPS chord below this * odometry = wheels slipping
