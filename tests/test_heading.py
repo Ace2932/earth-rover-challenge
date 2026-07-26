@@ -256,3 +256,46 @@ def test_the_filter_cannot_go_blind_indefinitely():
     est = HeadingEstimator(c)
     fixes, _ = drive_arc(est, turn_dps=2.0, secs=200.0)
     assert fixes > 0
+
+
+# ---------------- wobble must not starve the filter (issue #54) ----------------
+
+def drive_wobble(wobble_dps, sigma=1.5, secs=200.0, hz=5.0, seed=3):
+    """Straight line, but the controller oscillates chasing a noisy bearing.
+    Net turn is ~0: the rover is going straight."""
+    c = cfg()
+    est = HeadingEstimator(c)
+    rng = random.Random(seed)
+    lat, lon, t, truth = 37.8719, -122.2585, 1000.0, 0.0
+    fixes = 0
+    for k in range(int(secs * hz)):
+        yaw = wobble_dps * (1 if (k // 3) % 2 == 0 else -1)
+        truth = (truth + yaw / hz) % 360.0
+        d = 0.9 / hz
+        lat += d * math.cos(math.radians(truth)) / M_PER_DEG
+        lon += d * math.sin(math.radians(truth)) / (M_PER_DEG * math.cos(math.radians(lat)))
+        t += 1.0 / hz
+        _, src = est.update(lat + rng.gauss(0, sigma) / M_PER_DEG,
+                            lon + rng.gauss(0, sigma) / M_PER_DEG,
+                            orientation=0, now=t, cmd_linear=0.6,
+                            cmd_angular=yaw / c.yaw_rate_dps, speed=0.9)
+        fixes += src == "gps"
+    return fixes
+
+
+def test_a_wobbling_controller_still_gets_corrections():
+    """Noisy GPS makes the bearing jitter, so the controller wobbles — and summing
+    ABSOLUTE yaw counts that as turning. At +/-10 deg/s the accumulated |yaw| over
+    one 8.9 s baseline is 89 deg, right at the gate, while net turn is ~0 and the
+    rover is going straight."""
+    steady = drive_wobble(0)
+    for wobble in (10, 20):
+        got = drive_wobble(wobble)
+        assert got > 0.6 * steady, (
+            f"wobbling +/-{wobble} deg/s dropped corrections to {got} of {steady}")
+
+
+def test_a_sustained_net_turn_is_still_rejected():
+    """Net rotation is what the chord cannot describe, and it must still be caught."""
+    fixes, _ = drive_arc(HeadingEstimator(cfg()), turn_dps=60.0, secs=120.0)
+    assert fixes == 0

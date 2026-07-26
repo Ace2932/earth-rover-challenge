@@ -126,7 +126,18 @@ class HeadingEstimator:
         # resets on every rejection, so anchoring the clock to it means a filter
         # that rejects forever also starves forever without noticing.
         starved = (now - self.last_fix_t) > self.cfg.heading_max_blind_s
-        if self.turned_deg > self.cfg.heading_max_turn_deg and not starved:
+
+        # Gate on NET rotation, not on accumulated |yaw| (#54). What breaks the
+        # "chord bearing == heading" relationship is turning that the de-bias below
+        # cannot account for. Back-and-forth wobble — which is what a controller does
+        # when GPS noise makes the bearing jitter — averages out: it contributes ~0 to
+        # the de-bias and does not bend the path. Summing |yaw| counted that wobble as
+        # hard turning and starved the filter exactly when the noise made corrections
+        # most valuable. The absolute sum survives only as a loose sanity bound.
+        net_turn = abs(self.turn_signed)
+        too_curved = (net_turn > self.cfg.heading_max_turn_deg
+                      or self.turned_deg > self.cfg.heading_max_abs_turn_deg)
+        if too_curved and not starved:
             self._reset_anchor(lat, lon, now)          # past this the chord IS meaningless
             return self.heading, source
 
