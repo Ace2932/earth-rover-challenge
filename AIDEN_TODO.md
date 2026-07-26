@@ -88,3 +88,25 @@ Reviewed and rebuilt across ~30 issues. What exists now, all with tests:
 Dress rehearsal against the fake server, including an imperfect rover: completes 3/3 under
 σ=3 m GPS noise, 12 m bias, 0.8 s latency, 15% dropped commands, 10% 503s and 20% yaw error;
 parks on a flat battery; and refuses to start — loudly, exit 2 — when the bot is unavailable.
+
+### What the harness still cannot tell you
+
+Worth knowing before you read "completes 3/3" as reassurance:
+
+- **The linear model is exact.** Commanded throttle maps to speed with no slip, no gradient,
+  no battery sag. The heading filter's odometry baseline (`HEADING_MIN_MOVE_M`) is measured
+  from commanded speed when telemetry has none, so it is trusting a number the sim guarantees
+  and a real rover does not.
+- **The rover is a point.** No width, no turning radius, no wheels to catch a curb — so the
+  recovery ladder is only ever exercised against a rover that is stuck by fiat, never one that
+  is stuck in a way backing up would actually fix.
+- **The world is empty.** No obstacles, no pedestrians, no kerbs, no sidewalk edges. Nothing in
+  the harness can exercise the obstacle-stop path, which is part of why its training is a
+  negative result rather than a weak positive.
+- **GPS error is zero-mean noise plus a rotating bias.** Real urban GPS has multipath: sudden
+  jumps of tens of metres near buildings, correlated with exactly the places the course goes.
+- **Latency is constant.** Real 4G latency is spiky, and a spike is what turns a stale frame
+  into a wrong decision.
+
+None of that makes the rehearsal worthless — it caught two real bugs. It means "it completed
+in sim" is evidence about the code, not about the rover.
