@@ -638,6 +638,17 @@ def _load_vision(ckpt_path):
 DEFAULT_VISION = os.path.join(os.path.dirname(__file__), "vision", "sidewalk_frodobots.pt")
 
 
+def missing_checkpoint_help(path):
+    """The checkpoint is 43 MB and .gitignore excludes *.pt, so a fresh clone does
+    not have it. Say how to get one instead of just reporting its absence."""
+    return (f"vision checkpoint not found: {path}\n"
+            f"  download it:  bash vision/fetch_model.sh\n"
+            f"  or train one: vision/colab_frodobots.ipynb (full dataset), or see\n"
+            f"                vision/README.md for a local run on the sample data\n"
+            f"  what it is:   vision/MODEL_CARD.md — read the limitations first\n"
+            f"(GPS-only navigation works without it: drop --vision.)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mock", action="store_true", help="kinematic sim, no hardware")
@@ -654,9 +665,7 @@ def main():
     args = ap.parse_args()
 
     if args.vision and not os.path.exists(args.vision):
-        print(f"vision checkpoint not found: {args.vision}\n"
-              f"train one (Colab: vision/colab_frodobots.ipynb) or place "
-              f"sidewalk_frodobots.pt in vision/.")
+        print(missing_checkpoint_help(args.vision))
         return
 
     cfg = Config.from_env()

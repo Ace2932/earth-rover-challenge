@@ -21,6 +21,7 @@ which maps directly onto standard robot nav.
 | `DEPLOYMENT.md` | Why this belongs on a cloud VM, and how to run it there. |
 | `health.py` | Watches `/data`'s timestamp; restarts the SDK server when Chrome wedges. |
 | `.env.example` | SDK + tuning config. |
+| `vision/fetch_model.sh` | Download + verify the `--vision` checkpoint (not in the repo). |
 
 ## Setup
 ```bash
