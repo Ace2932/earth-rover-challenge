@@ -531,6 +531,35 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     time.sleep(period)
                 continue
 
+            # Telemetry guards: battery floor, GPS-quality speed scaling, and a
+            # commanded-vs-actual motion check that notices a rover going nowhere
+            # well before STUCK_S does.
+            verdict = guard.check(getattr(io, "last_data", None), prev_lin, now)
+            for w in verdict.warnings:
+                print(f"[follower] WARNING: {w}")
+            if verdict.abort:
+                print(f"[follower] ABORT: {verdict.abort}")
+                aborted = True
+                break
+            if verdict.stale_fix:
+                # The position we would steer on is no longer real. Treat it exactly
+                # like a failed telemetry read: skip the step, let the setpoint decay
+                # to a stop, and give up deliberately if it never recovers. Driving on
+                # a frozen fix ends in a recovery ladder planned against fiction (#59).
+                errors += 1
+                if errors >= cfg.max_consecutive_errors:
+                    print("[follower] position fix has not updated — stopping")
+                    break
+                if not is_mock:
+                    deadline = max(deadline + period, time.monotonic() - period)
+                    time.sleep(max(0.0, deadline - time.monotonic()))
+                continue
+
+            # The guards above run BEFORE this branch on purpose: a manoeuvre must not
+            # switch off the battery floor or the frozen-fix check. #59 exists to stop
+            # the rover driving on a fix that is no longer real, and "a recovery ladder
+            # planned against fiction" is the exact danger it named (#72).
+            #
             # While recovering, the manoeuvre owns the rover: no steering, no
             # checkpoint claims, no stuck accounting.
             if rec.active:
@@ -583,30 +612,6 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 d = server_distance(detail)
                 if d is not None:
                     sdist, sdist_t = d, now
-
-            # Telemetry guards: battery floor, GPS-quality speed scaling, and a
-            # commanded-vs-actual motion check that notices a rover going nowhere
-            # well before STUCK_S does.
-            verdict = guard.check(getattr(io, "last_data", None), prev_lin, now)
-            for w in verdict.warnings:
-                print(f"[follower] WARNING: {w}")
-            if verdict.abort:
-                print(f"[follower] ABORT: {verdict.abort}")
-                aborted = True
-                break
-            if verdict.stale_fix:
-                # The position we would steer on is no longer real. Treat it exactly
-                # like a failed telemetry read: skip the step, let the setpoint decay
-                # to a stop, and give up deliberately if it never recovers. Driving on
-                # a frozen fix ends in a recovery ladder planned against fiction (#59).
-                errors += 1
-                if errors >= cfg.max_consecutive_errors:
-                    print("[follower] position fix has not updated — stopping")
-                    break
-                if not is_mock:
-                    deadline = max(deadline + period, time.monotonic() - period)
-                    time.sleep(max(0.0, deadline - time.monotonic()))
-                continue
 
             if verdict.no_motion and not warned_no_motion:
                 warned_no_motion = True

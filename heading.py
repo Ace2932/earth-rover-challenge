@@ -103,6 +103,14 @@ class HeadingEstimator:
             self._reset_anchor(lat, lon, now)          # never span a stop
             return self.heading, source
 
+        # Reversing (the recovery ladder's back-up manoeuvre) points the chord
+        # BACKWARDS along the heading, so a course taken then reports the rover facing
+        # 180 deg from reality. Reject rather than add 180: a window can contain both
+        # directions, and then the chord means nothing at all (#71).
+        if cmd_linear < 0 or (speed is not None and speed < 0):
+            self._reset_anchor(lat, lon, now)
+            return self.heading, source
+
         # Odometry, not GPS, measures the baseline. Gating on the GPS-measured
         # displacement selects for samples where noise inflated it — precisely the
         # samples whose direction is least trustworthy.
