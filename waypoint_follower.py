@@ -21,12 +21,16 @@ import argparse
 import json
 import math
 import os
+import subprocess
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 
 from envcfg import coerce
 from geo import haversine_m, bearing_deg, wrap180
 from heading import HeadingEstimator
+from recovery import Recovery
 from rover_client import server_distance
 
 
@@ -55,6 +59,22 @@ class Config:
     loop_hz: float = 5.0
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
+
+    # --- stuck recovery (see recovery.py) ---
+    recovery_tries: int = 3            # back-up-and-turn attempts before a detour
+    recovery_pause_s: float = 0.4
+    recovery_reverse_s: float = 1.5
+    recovery_reverse_throttle: float = 0.35
+    recovery_yaw_s: float = 1.5
+    recovery_yaw: float = 0.6
+    recovery_offset_m: float = 8.0     # detour: approach from this far to the side
+    detour_radius_m: float = 3.0       # close enough to the detour point
+    detour_timeout_s: float = 45.0     # give up on the detour after this
+    # --- command streaming (see commander.py) ---
+    command_hz: float = 20.0           # rate the setpoint is re-sent to the bot
+    setpoint_stale_s: float = 0.5      # setpoint older than this decays to a stop
+    control_timeout_s: float = 1.0     # a stale command is worse than a dropped one
+    data_timeout_s: float = 1.5
 
     # --- surviving a bad 4G link ---
     max_consecutive_errors: int = 20   # give up only after this many in a row
@@ -137,10 +157,18 @@ def _gyro_z(data, enabled):
 
 
 class LiveIO:
-    def __init__(self, cfg):
+    def __init__(self, cfg, heartbeat_path=None):
         from rover_client import RoverClient
+        from commander import Commander
+        base = os.getenv("SDK_BASE_URL", "http://localhost:8000")
         self.cfg = cfg
-        self.c = RoverClient(base_url=os.getenv("SDK_BASE_URL", "http://localhost:8000"))
+        self.c = RoverClient(base_url=base, timeout=cfg.data_timeout_s)
+        # A separate client for commands: one attempt, short timeout. Retrying a
+        # control message is pointless — the streamer sends a fresher one in 50 ms.
+        self._cc = RoverClient(base_url=base, timeout=cfg.control_timeout_s, retries=1)
+        self.cmd = Commander(lambda lin, ang: self._cc.control(lin, ang),
+                             hz=cfg.command_hz, stale_s=cfg.setpoint_stale_s,
+                             heartbeat_path=heartbeat_path)
         self.h = HeadingEstimator(cfg)
         self.hsrc = "mag"
         self.last_cmd = (0.0, 0.0)      # what the estimator assumes is in force
@@ -157,8 +185,30 @@ class LiveIO:
         return lat, lon, heading
 
     def control(self, linear, angular):
-        self.last_cmd = (linear, angular)
-        self.c.control(linear, angular)
+        """Publish a setpoint. The Commander thread streams it; this never blocks."""
+        self.last_cmd = (linear, angular)   # the heading estimator's motion gate (#29)
+        self.cmd.set(linear, angular)
+
+    def close(self):
+        """Stop the rover, then check the telemetry agrees that it stopped."""
+        self.cmd.close()
+        for _ in range(6):
+            try:
+                d = self.c.get_data()
+            except Exception:
+                time.sleep(0.3)
+                continue
+            speed = abs(float(d.get("speed", 0) or 0))
+            if speed < 0.05:
+                return True
+            print(f"[follower] STILL MOVING after stop (speed {speed:.2f}) — resending")
+            try:
+                self._cc.control(0.0, 0.0)
+            except Exception:
+                pass
+            time.sleep(0.3)
+        print("[follower] WARNING: could not confirm the rover stopped")
+        return False
 
     def front_frame(self):
         try:
@@ -203,6 +253,9 @@ class LiveIO:
     def reached(self):
         return self.c.checkpoint_reached()      # (ok, detail)
 
+    def intervention(self, action):
+        return self.c.intervention(action)
+
 
 # ---------------- mock backend ----------------
 class MockIO:
@@ -228,6 +281,9 @@ class MockIO:
     def front_frame(self):
         return None
 
+    def close(self):
+        self.control(0, 0)
+
     def waypoints(self, route_file):
         b = (self.lat, self.lon)
         return [(b[0] + 0.0002, b[1] + 0.0001),
@@ -242,6 +298,32 @@ def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
     return max(0.0, min(gps_lin, vis_lin)), clamp(alpha * gps_ang + (1 - alpha) * vis_ang, -1, 1)
 
 
+def server_distance_usable(detour, sdist, sdist_age_s, cfg):
+    """May we navigate and measure progress on the server's distance right now?
+
+    Only when it is fresh AND we are actually heading for the checkpoint it
+    describes. While detouring we are deliberately driving away from that checkpoint
+    to get around an obstacle, so its distance is the wrong yardstick: a
+    correctly-executing detour would look like zero progress and re-trip stuck
+    detection within seconds (#31).
+    """
+    if detour is not None:
+        return False
+    if sdist is None:
+        return False
+    return sdist_age_s < cfg.server_dist_max_age_s
+
+
+def _intervene(io, action):
+    """Record a human takeover. Best-effort: it is bookkeeping, not control, and a
+    failure here must never stop us from stopping the rover."""
+    fn = getattr(io, "intervention", None)
+    if fn is None:
+        return
+    try:
+        fn(action)
+    except Exception as e:
+        print(f"[follower] intervention {action} failed: {e}")
 def safe_stop(io, cfg):
     """Stop the rover, retrying, swallowing everything.
 
@@ -276,6 +358,10 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     t0 = time.time()
     last_reach_try = 0.0
     sdist, sdist_t = None, 0.0        # the server's own distance, and when it said so
+    rec = Recovery(cfg)
+    detour = None                 # (lat, lon, deadline) — a waypoint, NOT a checkpoint
+    gave_up = False
+    deadline = t0
     errors = 0                      # consecutive failed steps
     try:
         while i < len(wps):
@@ -295,16 +381,40 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 if not is_mock:
                     time.sleep(period)
                 continue
+
+            # While recovering, the manoeuvre owns the rover: no steering, no
+            # checkpoint claims, no stuck accounting.
+            if rec.active:
+                rlin, rang, still = rec.step(now)
+                io.control(rlin, rang)
+                if not still:
+                    print(f"[follower] recovery attempt {rec.attempts} done — retrying")
+                    best_dist, t_best, prev_ang = math.inf, now, 0.0
+                step += 1
+                if not is_mock:
+                    deadline = max(deadline + period, time.time() - period)
+                    time.sleep(max(0.0, deadline - time.time()))
+                continue
+
+            if detour and (now > detour[2] or
+                           haversine_m(lat, lon, detour[0], detour[1]) < cfg.detour_radius_m):
+                print("[follower] detour reached — approaching the checkpoint again")
+                detour = None
+                best_dist, t_best = math.inf, now
+                sdist, sdist_t = None, 0.0         # target changed; ask again
+
+            tlat, tlon = detour[:2] if detour else wps[i]
             tlat, tlon = wps[i]
             dist = haversine_m(lat, lon, tlat, tlon)
             brg = bearing_deg(lat, lon, tlat, tlon)
 
-            # server-authoritative checkpoint. Ask well before our own fix agrees we
-            # have arrived: the acceptance radius is the SERVER's, not ours, and its
-            # refusal carries the distance it measured. Rate-limited so we do not
-            # spam the API (unthrottled in the mock, whose loop has no sleep).
-            if dist < cfg.checkpoint_radius_m and (is_mock or
-                                                   now - last_reach_try > cfg.checkpoint_poll_s):
+            # Ask the server first, so its distance is available to everything below.
+            # It decides whether the checkpoint counts, and its refusal carries the
+            # distance it measured. Rate-limited so we do not spam the API (unthrottled
+            # in the mock, whose loop has no sleep). Never asked while on a detour —
+            # the detour point is not a checkpoint, and claiming it would be a lie.
+            if not detour and dist < cfg.checkpoint_radius_m and (
+                    is_mock or now - last_reach_try > cfg.checkpoint_poll_s):
                 last_reach_try = now
                 ok, detail = io.reached()
                 if ok:
@@ -316,6 +426,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     i += 1
                     prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
                     sdist, sdist_t = None, 0.0
+                    rec = Recovery(cfg)          # fresh budget for the next leg
+                    detour = None
                     continue
                 d = server_distance(detail)
                 if d is not None:
@@ -324,7 +436,12 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             # Navigate on the server's distance while it is fresh — it is the number
             # that decides whether the checkpoint counts. Bearing still comes from our
             # own fix; the server only tells us how far, never which way.
-            fresh = sdist is not None and now - sdist_t < cfg.server_dist_max_age_s
+            #
+            # NOT while detouring (#31): that distance is to the CHECKPOINT, but we are
+            # deliberately driving away from it to get around an obstacle. Measuring
+            # progress against it would make a correctly-executing detour look like no
+            # progress at all and re-trip stuck detection within seconds.
+            fresh = server_distance_usable(detour, sdist, now - sdist_t, cfg)
             nav_dist = sdist if fresh else dist
 
             # stuck detection (per waypoint), measured the same way
@@ -333,6 +450,28 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             elif now - t_best > cfg.stuck_s:
                 print(f"[follower] STUCK on wp {i+1} ({nav_dist:.1f}m, "
                       f"no progress {cfg.stuck_s}s)")
+                if not rec.exhausted:
+                    rec.begin(now)
+                    print(f"[follower] recovery attempt {rec.attempts}/{cfg.recovery_tries}: "
+                          f"backing up and turning")
+                    continue
+                if cfg.recovery_offset_m > 0 and not detour:
+                    # Approach from a different angle: aim at a point beside the
+                    # checkpoint. It is not a checkpoint, so it is never claimed.
+                    side = bearing_deg(lat, lon, *wps[i]) + 90.0
+                    dlat = cfg.recovery_offset_m * math.cos(math.radians(side)) / 111111.0
+                    dlon = (cfg.recovery_offset_m * math.sin(math.radians(side))
+                            / (111111.0 * math.cos(math.radians(lat))))
+                    detour = (wps[i][0] + dlat, wps[i][1] + dlon, now + cfg.detour_timeout_s)
+                    print(f"[follower] recovery exhausted — detouring "
+                          f"{cfg.recovery_offset_m:.0f}m to the side of wp {i+1}")
+                    best_dist, t_best = math.inf, now
+                    sdist, sdist_t = None, 0.0     # stale the moment the target changes
+                    continue
+                print(f"[follower] cannot free the rover on wp {i+1} — recording an "
+                      f"intervention and stopping")
+                _intervene(io, "start")
+                gave_up = True
                 break
 
             linear, angular, err = steer(nav_dist, brg, heading, cfg)
@@ -363,12 +502,36 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                       f"[{io.hsrc}] err={err:+6.1f} lin={linear:+.2f} ang={angular:+.2f}")
             step += 1
             if not is_mock:
-                time.sleep(period)
+                # Hold the loop rate: sleeping a fixed period AFTER the work makes the
+                # real rate `period + work`, which drifts as the link slows down.
+                deadline = max(deadline + period, time.time() - period)
+                time.sleep(max(0.0, deadline - time.time()))
     finally:
-        safe_stop(io, cfg)            # ALWAYS stop the rover, even on crash/ctrl-c
+        # ALWAYS stop the rover — crash, Ctrl-C, or a clean finish. A backend with a
+        # Commander does the hardened version (retried stop plus a telemetry read-back
+        # confirming speed actually fell to zero); safe_stop covers the rest. Neither
+        # may raise here: this is a finally, and raising would mask the real failure
+        # AND leave the rover moving.
+        # Always command a stop ourselves first, then let the backend tear down. Do
+        # NOT delegate the stop to close() alone: run() cannot know that a given
+        # backend's close() stops the rover, and a safety path must not rest on that
+        # assumption.
+        try:
+            safe_stop(io, cfg)
+        except Exception as e:
+            print(f"[follower] stop failed: {e}")
+        try:
+            closer = getattr(io, "close", None)
+            if closer:
+                closer()
+        except Exception as e:
+            print(f"[follower] backend close failed: {e}")
+
         if logger:
             logger.close()
-    done = bool(wps) and i >= len(wps)
+    # Giving up after the recovery ladder is not a completed mission, and an empty
+    # route was never a mission at all.
+    done = bool(wps) and i >= len(wps) and not gave_up
     print(f"[follower] {'COMPLETE' if done else 'STOPPED'} — {i}/{len(wps)} waypoints, {step} steps")
     return done
 
@@ -417,6 +580,11 @@ def main():
                     help=f"fuse a trained sidewalk policy; bare --vision loads "
                          f"{os.path.relpath(DEFAULT_VISION)}, or pass a checkpoint path")
     ap.add_argument("--log", help="write a per-step CSV to this path")
+    ap.add_argument("--heartbeat", default=os.getenv("HEARTBEAT_PATH"),
+                    help="file the command streamer touches on every delivered command")
+    ap.add_argument("--watchdog", action="store_true",
+                    help="also run watchdog.py in a separate process; it stops the rover "
+                         "if this one dies without cleaning up (kill -9, OOM, sleep)")
     args = ap.parse_args()
 
     if args.vision and not os.path.exists(args.vision):
@@ -426,18 +594,45 @@ def main():
         return
 
     cfg = Config.from_env()
-    io = MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock else LiveIO(cfg)
+    # Load the policy BEFORE spawning the watchdog: a missing torch used to be able
+    # to return from main() with a watchdog subprocess already running, orphaning a
+    # process that holds the bot's only SDK session.
     try:
         vision_fn = _load_vision(args.vision) if args.vision else None
     except ImportError as e:
         print(vision_import_help(e))
         return
+
+    heartbeat = args.heartbeat or (os.path.join(tempfile.gettempdir(), "erc_follower.hb")
+                                   if args.watchdog else None)
+    watchdog = None
+    if args.watchdog and not args.mock:
+        watchdog = subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "watchdog.py"),
+             "--heartbeat", heartbeat, "--base-url",
+             os.getenv("SDK_BASE_URL", "http://localhost:8000")])
+        print(f"[follower] watchdog pid {watchdog.pid} on {heartbeat}")
+    elif args.watchdog:
+        print("[follower] --watchdog ignored in --mock (no rover to run away)")
+
+    io = (MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock
+          else LiveIO(cfg, heartbeat_path=heartbeat))
     logger = RunLogger(args.log) if args.log else None
     try:
         run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
     except MissionUnavailable as e:
         print(f"[follower] cannot start: {e}")
         raise SystemExit(2)
+    finally:
+        # The watchdog exits by itself when Commander.close() removes the heartbeat;
+        # only force it if it has not noticed. This must run on the MissionUnavailable
+        # path too, or a refused mission leaves an orphan process holding the bot.
+        if watchdog:
+            try:
+                watchdog.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                watchdog.terminate()
 
 
 if __name__ == "__main__":
