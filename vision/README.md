@@ -7,6 +7,11 @@ follower: **GPS picks the direction, vision keeps the wheels on the walkable sur
 > The trained checkpoint is **not in the repo** (43 MB, `*.pt` is gitignored).
 > `bash vision/fetch_model.sh` downloads and verifies it; `MODEL_CARD.md` says what it is,
 > what it was trained on, and why you should gate it hard. GPS-only navigation needs none of it.
+>
+> Checkpoints are loaded with `weights_only=True`: a `.pt` is a pickle, and loading one with
+> `weights_only=False` executes whatever is inside it — which matters more now that a script
+> downloads one. Keep any new loader on the safe path, and keep `train.py` saving only tensors
+> and primitives so it stays possible.
 
 ## Files
 | File | Role |

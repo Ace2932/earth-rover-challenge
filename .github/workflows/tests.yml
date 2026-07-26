@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      # Self-sufficient on purpose: this must not depend on #34 landing first.
+      # Once requirements-dev.txt exists, collapse this to `-r requirements-dev.txt`.
+      - run: pip install -r requirements.txt "pytest>=8.0"
+      - name: unit tests
+        # Vision tests importorskip torch, which is not installed here on purpose:
+        # the ML stack is a few hundred MB and GPS navigation does not need it.
+        run: PYTHONPATH=. pytest tests/ -q
+
+  end-to-end:
+    # The unit tests mock the backend. This drives the REAL HTTP client against the
+    # fake SDK server, which is where integration breakage actually shows up —
+    # exactly the class of bug (#29) that passed every unit test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: follower completes a mission over HTTP
+        run: |
+          python fake_sdk_server.py 8777 &
+          sleep 2
+          SDK_BASE_URL=http://localhost:8777 timeout 300 python waypoint_follower.py \
+            | tee /tmp/run.log
+          grep -q "COMPLETE — 3/3 waypoints" /tmp/run.log
+      - name: follower survives an unreliable link
+        run: |
+          FAKE_FAIL_RATE=0.3 python fake_sdk_server.py 8778 &
+          sleep 2
+          SDK_BASE_URL=http://localhost:8778 timeout 300 python waypoint_follower.py \
+            | tee /tmp/flaky.log
+          grep -q "COMPLETE — 3/3 waypoints" /tmp/flaky.log
