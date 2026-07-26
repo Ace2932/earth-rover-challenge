@@ -73,6 +73,7 @@ class Config:
     gps_signal_poor: float = 5.0
     min_speed_scale: float = 0.3       # slowest we will crawl on a bad fix
     no_motion_s: float = 4.0           # commanded to move this long with no wheel motion
+    fix_max_age_s: float = 3.0         # /data timestamp frozen this long -> do not drive on it
 
     # --- vision fusion (only used with --vision) ---
     vision_alpha: float = 0.5          # weight on VISION steering (0 = pure GPS)
@@ -215,22 +216,40 @@ class LiveIO:
     def close(self):
         """Stop the rover, then check the telemetry agrees that it stopped."""
         self.cmd.close()
+        first_ts = None
+        frozen = False
         for _ in range(6):
             try:
                 d = self.c.get_data()
             except Exception:
                 time.sleep(0.3)
                 continue
+            # A frozen /data reports whatever speed it last saw, forever. That is not
+            # evidence the rover is moving — it is the absence of evidence either way,
+            # and saying "STILL MOVING" would be a claim we cannot support (#59).
+            ts = d.get("timestamp")
+            advanced = first_ts is not None and ts is not None and ts != first_ts
+            if first_ts is None:
+                first_ts = ts
+            elif ts is not None and ts == first_ts:
+                frozen = True
             speed = abs(float(d.get("speed", 0) or 0))
-            if speed < 0.05:
+            if speed < 0.05 and not frozen:
                 return True
-            print(f"[follower] STILL MOVING after stop (speed {speed:.2f}) — resending")
+            # Only claim the rover is still moving once we have seen the telemetry
+            # advance — otherwise the speed we are reading may be a frozen echo.
+            if advanced:
+                print(f"[follower] STILL MOVING after stop (speed {speed:.2f}) — resending")
             try:
                 self._cc.control(0.0, 0.0)
             except Exception:
                 pass
             time.sleep(0.3)
-        print("[follower] WARNING: could not confirm the rover stopped")
+        if frozen:
+            print("[follower] WARNING: telemetry is frozen — cannot confirm the rover "
+                  "stopped. Stop commands were sent; verify the rover by eye.")
+        else:
+            print("[follower] WARNING: could not confirm the rover stopped")
         return False
 
     def front_frame(self):
@@ -519,6 +538,20 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 print(f"[follower] ABORT: {verdict.abort}")
                 aborted = True
                 break
+            if verdict.stale_fix:
+                # The position we would steer on is no longer real. Treat it exactly
+                # like a failed telemetry read: skip the step, let the setpoint decay
+                # to a stop, and give up deliberately if it never recovers. Driving on
+                # a frozen fix ends in a recovery ladder planned against fiction (#59).
+                errors += 1
+                if errors >= cfg.max_consecutive_errors:
+                    print("[follower] position fix has not updated — stopping")
+                    break
+                if not is_mock:
+                    deadline = max(deadline + period, time.time() - period)
+                    time.sleep(max(0.0, deadline - time.time()))
+                continue
+
             if verdict.no_motion and not warned_no_motion:
                 warned_no_motion = True
                 print("[follower] commanded to move but no wheel motion — dropped "

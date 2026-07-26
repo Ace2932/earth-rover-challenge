@@ -106,6 +106,9 @@ The fake server reproduces the SDK's real responses, including the `400` with
   parks below `BATTERY_ABORT_PCT` rather than dying somewhere inconvenient, scales speed down
   between `GPS_SIGNAL_POOR` and `GPS_SIGNAL_GOOD`, and flags "commanded to move, no wheel
   motion" (a dropped RTM command, or a rover held up on something) before `STUCK_S` does.
+  It also refuses to drive on a **frozen position fix**: the SDK serves `/data` from a value
+  cached in the browser page, so a stalled RTM link keeps returning 200 with the last payload.
+  Judged by timestamp *advancement*, not against our clock, so no clock-skew assumption.
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 
 Both quick-start commands end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON
