@@ -37,8 +37,10 @@ class HeadingEstimator:
         self.locked = False          # has a GPS course ever corrected us?
         self.anchor = None           # (lat, lon, t) the current baseline started from
         self.turned_deg = 0.0        # |yaw| integrated since the anchor
+        self.turn_signed = 0.0       # signed yaw since the anchor, for de-biasing
         self.odo_m = 0.0             # distance travelled since the anchor, from wheels
         self.n_fix = 0               # course corrections applied so far
+        self.last_fix_t = None       # when the last correction landed
         self.last_t = None
 
     # ---------------- internals ----------------
@@ -59,6 +61,7 @@ class HeadingEstimator:
     def _reset_anchor(self, lat, lon, now):
         self.anchor = (lat, lon, now)
         self.turned_deg = 0.0
+        self.turn_signed = 0.0
         self.odo_m = 0.0
 
     def _gain(self):
@@ -81,12 +84,14 @@ class HeadingEstimator:
         if self.heading is None:
             self.heading = self._mag(orientation)
             self._reset_anchor(lat, lon, now)
+            self.last_fix_t = now
             return self.heading, "mag"
 
         # ---- predict ----
         yaw_rate = gyro_z_dps if gyro_z_dps is not None else cmd_angular * self.cfg.yaw_rate_dps
         self.heading = (self.heading + yaw_rate * dt) % 360.0
         self.turned_deg += abs(yaw_rate) * dt
+        self.turn_signed += yaw_rate * dt
         # The magnetometer seeds the filter and is never read again: re-reading a
         # miscalibrated `orientation` every step is what makes a rover turn in place
         # forever. Dead reckoning from a wrong seed still terminates the turn, drives
@@ -112,8 +117,17 @@ class HeadingEstimator:
         if self.odo_m < self.cfg.heading_min_move_m:
             return self.heading, source
 
-        if self.turned_deg > self.cfg.heading_max_turn_deg:
-            self._reset_anchor(lat, lon, now)          # chord across a curve, not a heading
+        # A turn does not make the chord useless, it makes it BIASED. Over a
+        # constant-rate turn the chord bearing is the AVERAGE heading across the
+        # window, so the heading at the end is chord + turn/2. De-bias rather than
+        # discard: rejecting every curved sample is how the filter went blind on a
+        # course made of curves (#44).
+        # Measured from the last ACCEPTED fix, not from the anchor — the anchor
+        # resets on every rejection, so anchoring the clock to it means a filter
+        # that rejects forever also starves forever without noticing.
+        starved = (now - self.last_fix_t) > self.cfg.heading_max_blind_s
+        if self.turned_deg > self.cfg.heading_max_turn_deg and not starved:
+            self._reset_anchor(lat, lon, now)          # past this the chord IS meaningless
             return self.heading, source
 
         chord = haversine_m(alat, alon, lat, lon)
@@ -121,10 +135,12 @@ class HeadingEstimator:
             self._reset_anchor(lat, lon, now)          # wheels turning, rover isn't
             return self.heading, source
 
-        course = bearing_deg(alat, alon, lat, lon)
-        self.heading = (self.heading
-                        + self._gain() * wrap180(course - self.heading)) % 360.0
+        course = (bearing_deg(alat, alon, lat, lon) + self.turn_signed / 2.0) % 360.0
+        # Starved samples are the ones we would normally reject; trust them less.
+        gain = self._gain() * (0.5 if starved else 1.0)
+        self.heading = (self.heading + gain * wrap180(course - self.heading)) % 360.0
         self.n_fix += 1
+        self.last_fix_t = now
         self.locked = True
         self._reset_anchor(lat, lon, now)
         return self.heading, "gps"

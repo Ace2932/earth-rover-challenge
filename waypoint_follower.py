@@ -67,7 +67,8 @@ class Config:
     stop_attempts: int = 10            # tries to get the rover stopped on the way out
     # --- heading estimation (see heading.py) ---
     heading_min_move_m: float = 8.0    # ODOMETRY baseline a course needs to beat the noise
-    heading_max_turn_deg: float = 30.0 # reject a course if we turned this much covering it
+    heading_max_turn_deg: float = 90.0 # past this a chord tells you nothing about heading
+    heading_max_blind_s: float = 20.0  # no correction for this long -> take the next one anyway
     heading_gain: float = 0.25         # floor on the correction gain (see heading._gain)
     heading_slip_ratio: float = 0.75   # GPS chord below this * odometry = wheels slipping
     heading_anchor_max_age_s: float = 30.0
@@ -422,6 +423,16 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     return done
 
 
+def vision_import_help(exc):
+    """--vision needs the ML stack, which is deliberately not in requirements.txt so
+    GPS-only navigation stays a `pip install requests` away. Say which file to
+    install rather than surfacing a bare ImportError."""
+    return (f"--vision needs dependencies that are not installed: {exc}\n"
+            f"  pip install -r vision/requirements.txt\n"
+            f"    (torch, torchvision, pillow, opencv — a few hundred MB)\n"
+            f"GPS-only navigation needs none of them: drop --vision.")
+
+
 def _load_vision(ckpt_path):
     import torch
     from io import BytesIO
@@ -466,7 +477,11 @@ def main():
 
     cfg = Config.from_env()
     io = MockIO((37.8719, -122.2585, 0.0), cfg) if args.mock else LiveIO(cfg)
-    vision_fn = _load_vision(args.vision) if args.vision else None
+    try:
+        vision_fn = _load_vision(args.vision) if args.vision else None
+    except ImportError as e:
+        print(vision_import_help(e))
+        return
     logger = RunLogger(args.log) if args.log else None
     try:
         run(io, cfg, route_file=args.route, vision_fn=vision_fn, logger=logger)
