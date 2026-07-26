@@ -56,6 +56,8 @@ class Config:
     align_deg: float = 20.0            # within this err -> full cruise
     deadband_deg: float = 3.0          # ignore tiny heading errors (anti-jitter)
     approach_m: float = 6.0            # start slowing within this distance of a wp
+    bearing_trust_m: float = 5.0       # below this the bearing is GPS noise, so damp
+                                       # the turn rather than chase it (0 = disabled)
     min_creep: float = 0.25            # floor on the approach-slowdown factor
     max_dang: float = 0.35             # max angular change per step (slew limit)
     loop_hz: float = 5.0
@@ -138,10 +140,22 @@ class Config:
 
 
 def steer(dist, bearing, heading, cfg):
-    """Pure control law -> (linear, angular, err_deg)."""
+    """Pure control law -> (linear, angular, err_deg).
+
+    The bearing comes from two GPS points, so its reliability scales with how far
+    apart they are. At sigma=1.5 m the bearing standard deviation is 2.5 deg at 30 m,
+    14 deg at 5 m and 55 deg at 2 m — by then it carries no direction at all, and
+    steering hard on it makes the rover spin on the spot chasing noise (#66). So
+    below `bearing_trust_m` the turn is damped in proportion to how much of the
+    bearing is still signal.
+    """
     err = wrap180(bearing - heading)
     a = 0.0 if abs(err) < cfg.deadband_deg else cfg.kp_ang * err / 45.0
     angular = clamp(a, -1.0, 1.0)
+    if cfg.bearing_trust_m > 0 and dist < cfg.bearing_trust_m:
+        # Scale the COMMANDED turn, not the raw gain: at close range the gain is
+        # saturated anyway, so damping before the clamp would barely change anything.
+        angular *= clamp(dist / cfg.bearing_trust_m, 0.0, 1.0)
     if abs(err) > 90:
         linear = 0.0                                   # turn in place if pointing away
     elif abs(err) <= cfg.align_deg:
