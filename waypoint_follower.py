@@ -152,6 +152,18 @@ class Config:
             v = getattr(self, f, 0)
             if not 0.0 <= v <= 1.0:
                 raise ValueError(f"{f.upper()} must be between 0 and 1, got {v}")
+
+        # Relationships, not values. Neither of these fields is wrong alone, which is
+        # why the per-field checks above cannot see them (#74). The commander decays a
+        # setpoint nobody has refreshed, so a loop slower than that window expires its
+        # own setpoint between every iteration — measured at 52% of the mission spent
+        # stopped, with LOOP_HZ=1 and the default staleness.
+        period = 1.0 / self.loop_hz
+        if self.setpoint_stale_s <= period:
+            raise ValueError(
+                f"SETPOINT_STALE_S ({self.setpoint_stale_s}) must exceed the control "
+                f"period 1/LOOP_HZ ({period:.2f}s), or the setpoint expires between "
+                f"iterations and the rover stutters")
         return self
 
     @classmethod
@@ -750,6 +762,19 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     return done
 
 
+def watchdog_timeout_s(cfg):
+    """How long the watchdog should wait before calling the follower dead.
+
+    The heartbeat is touched on each delivered command, so its interval is
+    1/COMMAND_HZ. A timeout shorter than that stops a perfectly healthy rover —
+    measured at COMMAND_HZ=0.5 against the 1 s default, 14 stops in 6 s (#74).
+    Slower streaming inherently means slower detection; it must not mean false
+    detection. Floored at the historic default so ordinary jitter never reads as
+    death.
+    """
+    return max(1.0, 4.0 / cfg.command_hz)
+
+
 def vision_import_help(exc):
     """--vision needs the ML stack, which is deliberately not in requirements.txt so
     GPS-only navigation stays a `pip install requests` away. Say which file to
@@ -851,7 +876,8 @@ def main():
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "watchdog.py"),
              "--heartbeat", heartbeat, "--base-url",
-             os.getenv("SDK_BASE_URL", "http://localhost:8000")])
+             os.getenv("SDK_BASE_URL", "http://localhost:8000"),
+             "--timeout", str(watchdog_timeout_s(cfg))])
         print(f"[follower] watchdog pid {watchdog.pid} on {heartbeat}")
     elif args.watchdog:
         print("[follower] --watchdog ignored in --mock (no rover to run away)")
