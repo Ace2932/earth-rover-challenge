@@ -49,8 +49,14 @@ The fake server reproduces the SDK's real responses, including the `400` with
 ### Built for a real 4G rover
 - **Safety-stop always:** the control loop is wrapped in `try/finally` — any crash, `Ctrl-C`,
   or exception still sends `control(0,0)`. The rover never runs away on an error.
-- **Request resilience:** `RoverClient` retries with backoff (verified surviving a 60%
-  injected fault rate); on total failure the loop stops the rover rather than driving blind.
+- **Request resilience:** `RoverClient` retries with backoff, and the control loop tolerates
+  whatever gets through: a failed step is skipped rather than fatal, and the run gives up only
+  after `MAX_CONSECUTIVE_ERRORS` in a row. Measured against the fake server — **30% injected
+  fault rate: completes 3/3 waypoints; 60%: degrades to 1/3 within the time limit but never
+  crashes and never leaves the rover driving.** The exit stop is retried and never raises, so
+  it cannot mask the original failure or strand a moving rover.
+- **Heading fusion:** uses GPS course-over-ground when moving (drift-free, no calibration)
+  and the magnetometer only when too slow — so a bad `orientation` calibration can't ruin a run.
 - **Heading estimation (`heading.py`):** a complementary filter. Yaw is dead-reckoned
   between fixes (gyro if trusted, else the commanded angular); corrections come only from a
   GPS course measured over an **odometry** baseline of `HEADING_MIN_MOVE_M`, rejected if the
