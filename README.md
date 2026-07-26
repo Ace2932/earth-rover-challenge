@@ -21,6 +21,7 @@ which maps directly onto standard robot nav.
 | `DEPLOYMENT.md` | Why this belongs on a cloud VM, and how to run it there. |
 | `health.py` | Watches `/data`'s timestamp; restarts the SDK server when Chrome wedges. |
 | `.env.example` | SDK + tuning config. |
+| `vision/fetch_model.sh` | Download + verify the `--vision` checkpoint (not in the repo). |
 
 ## Setup
 ```bash
@@ -133,6 +134,9 @@ backend is already self-consistent, so tune the *control gains* (`KP_ANG`, `CRUI
 - **Perception for Urban → `vision/` (built, see `vision/README.md`):** behavior-cloning
   sidewalk-keeping policy fused with the GPS follower. Pipeline proven on a synthetic task
   (val_mse ~1e-4); swap in real FrodoBots data (needs HF access) to make it competitive.
+  Fusion is gated: vision is ignored above `VISION_MAX_ERR_DEG` (the GPS controller is
+  turning in place), scaled by policy confidence, skipped for camera frames older than
+  `FRAME_MAX_AGE_S`, and floored at `VISION_MIN_LINEAR` so it cannot stall the rover.
 - **Recovery:** intervention API + stuck-detection (no GPS progress → back off / re-plan).
 - **Off-road / Indoor:** image-goal policy (no GPS) — bigger lift, reuse the control loop.
 - Log frames to `frames/` for offline eval; add a small dashboard.

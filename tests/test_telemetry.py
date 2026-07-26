@@ -165,3 +165,4 @@ def test_the_loop_scales_speed_down_on_poor_gps():
     run(good, c)
     run(poor, c)
     assert max(l for l, _ in poor.commands) < max(l for l, _ in good.commands)
+
