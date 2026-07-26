@@ -97,6 +97,10 @@ The fake server reproduces the SDK's real responses, including the `400` with
   or an empty checkpoint list aborts with `MissionUnavailable` instead of reporting
   `COMPLETE — 0/0`. Checkpoints are ordered by `sequence`, and a restart resumes from the
   server's `latest_scanned_checkpoint` rather than driving the whole route again.
+- **Telemetry guards (`telemetry.py`):** `/data` carries more than a position. The loop now
+  parks below `BATTERY_ABORT_PCT` rather than dying somewhere inconvenient, scales speed down
+  between `GPS_SIGNAL_POOR` and `GPS_SIGNAL_GOOD`, and flags "commanded to move, no wheel
+  motion" (a dropped RTM command, or a rover held up on something) before `STUCK_S` does.
 - **Run logging:** `--log run.csv` records pose/heading-source/cmd every step for tuning.
 
 Both quick-start commands end in `COMPLETE — 3/3 waypoints`. (B) exercises the real `requests` client, JSON
