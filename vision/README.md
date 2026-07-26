@@ -4,6 +4,10 @@ Turns "reaches GPS checkpoints" into "stays on the sidewalk between them." A beh
 cloning policy maps the front camera frame → steering, fused with the GPS-bearing
 follower: **GPS picks the direction, vision keeps the wheels on the walkable surface.**
 
+> Checkpoints are loaded with `weights_only=True`: a `.pt` is a pickle, and loading one with
+> `weights_only=False` executes whatever is inside it. Keep any new loader on the safe path,
+> and keep `train.py` saving only tensors and primitives so it stays possible.
+
 ## Files
 | File | Role |
 |---|---|

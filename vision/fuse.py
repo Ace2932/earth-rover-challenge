@@ -29,7 +29,7 @@ def _demo():
     ckpt_path = "vision/sidewalk_policy.pt"
     if not os.path.exists(ckpt_path):
         print("train first: PYTHONPATH=vision python3 vision/train.py"); return
-    ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ck = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model = SidewalkPolicy(backbone=ck["backbone"])
     model.load_state_dict(ck["state_dict"])
 
