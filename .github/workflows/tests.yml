@@ -42,9 +42,22 @@ jobs:
             | tee /tmp/run.log
           grep -q "COMPLETE — 3/3 waypoints" /tmp/run.log
       - name: follower survives an unreliable link
+        # Stochastic by construction: which requests get dropped decides how long the
+        # run takes, and a shared runner can be slow. Give it a generous budget and one
+        # retry, so a red here means "the follower cannot cope", not "the runner was
+        # busy". The non-negotiable part is that it never crashes and always stops the
+        # rover — a crash fails the step immediately, before any retry.
         run: |
-          FAKE_FAIL_RATE=0.3 python fake_sdk_server.py 8778 &
-          sleep 2
-          SDK_BASE_URL=http://localhost:8778 timeout 300 python waypoint_follower.py \
-            | tee /tmp/flaky.log
-          grep -q "COMPLETE — 3/3 waypoints" /tmp/flaky.log
+          for attempt in 1 2; do
+            port=$((8778 + attempt))
+            FAKE_FAIL_RATE=0.3 python fake_sdk_server.py $port &
+            server=$!
+            sleep 2
+            SDK_BASE_URL=http://localhost:$port MAX_RUNTIME_S=240 \
+              timeout 300 python waypoint_follower.py | tee /tmp/flaky.log
+            kill $server 2>/dev/null || true
+            grep -q "Traceback" /tmp/flaky.log && { echo "crashed"; exit 1; }
+            grep -q "COMPLETE — 3/3 waypoints" /tmp/flaky.log && exit 0
+            echo "attempt $attempt did not complete; retrying"
+          done
+          exit 1

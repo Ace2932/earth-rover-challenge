@@ -1,0 +1,3 @@
+# Everything the runtime needs, plus the test runner the README tells you to use.
+-r requirements.txt
+pytest>=8.0
