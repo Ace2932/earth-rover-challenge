@@ -52,11 +52,20 @@ The fake server reproduces the SDK's real responses, including the `400` with
 `.env.example` for every `FAKE_*` knob. All error injection is off by default.
 
 ### Built for a real 4G rover
-- **Safety-stop on every exit path:** the control loop is wrapped in `try/finally`, and the
-  stop is retried and never raises, so a crash, `Ctrl-C` or an exhausted link still leaves the
-  rover stopped. It cannot help against `kill -9`, an OOM kill or a suspended machine — the
-  rover latches its last command, and whether the firmware zeroes on link loss is still
-  unconfirmed. That is what the out-of-process watchdog is for.
+- **Commands are streamed, not fired once (`commander.py`):** a background thread re-sends the
+  current setpoint at `COMMAND_HZ` (20 Hz, matching the SDK's own reference teleop), because
+  `/control` is an unacked Agora RTM message — an HTTP 200 means the browser called
+  `sendMessage`, not that the bot heard it. `set()` never blocks on the network.
+- **Stale setpoint decays to a stop:** if the control loop stops publishing for
+  `SETPOINT_STALE_S` (0.5 s) — blocked on a slow request, wedged, anything — the stream falls
+  to `(0,0)` instead of holding throttle. An in-process watchdog, for free.
+- **Out-of-process watchdog (`watchdog.py`, `--watchdog`):** `try/finally` cannot survive
+  `kill -9`, an OOM, or the laptop sleeping, and the rover latches its last command. A second
+  process watches a heartbeat and stops the rover if it goes stale. Verified: `kill -9` on the
+  follower produced a stop **1.07 s** later and zero false stops while healthy. Whether the bot's
+  own firmware zeroes on link loss is still unconfirmed — see the runbook's first-session check.
+- **Hardened stop:** on exit the stop is retried, and the telemetry is read back to confirm
+  `speed` actually fell to zero — an HTTP 200 is not evidence the rover stopped.
 - **Request resilience:** `RoverClient` retries with backoff, and the control loop tolerates
   whatever gets through: a failed step is skipped rather than fatal, and the run gives up only
   after `MAX_CONSECUTIVE_ERRORS` in a row. Measured against the fake server — **30% injected
