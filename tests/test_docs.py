@@ -19,6 +19,9 @@ RETIRED = [
      "describes the GPS-course-per-step estimator deleted in #18"),
     ("README.md", "uses GPS course-over-ground when moving",
      "same retired estimator"),
+    # #4: replaced by the recovery ladder, which does NOT stop on no progress
+    ("README.md", "no progress for `STUCK_S` → stop",
+     "superseded by the recovery ladder in #22"),
     # #40: the claim that could not be reproduced
     ("README.md", "verified surviving a 60%",
      "unverified; the measured figures are in the resilience bullet"),

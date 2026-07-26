@@ -30,6 +30,19 @@ export HEADING_SCALE=... HEADING_OFFSET=... HEADING_SIGN=...
 .venv/bin/python waypoint_follower.py         # waypoints from /checkpoints-list
 ```
 
+## ⚠️ First live session: find out whether the bot has its own watchdog
+Send a command, kill the client hard, and watch:
+```bash
+curl -s -XPOST localhost:8000/control -H 'content-type: application/json' \
+  -d '{"command":{"linear":0.3,"angular":0,"lamp":0}}'   # keep ~2 m clear ahead
+# ...then stop sending. Does it coast to a stop by itself, and how fast?
+```
+Ask Frodobots directly whether the firmware zeroes on RTM loss and after what timeout.
+Until that is answered, drive with `--watchdog`:
+```bash
+.venv/bin/python waypoint_follower.py --watchdog --log run1.csv
+```
+
 ## Sign check (the one thing calibration can't fully resolve in one run)
 Start the follower. If it steers *away* from the target (error grows, spins):
 `export HEADING_SIGN=-1` and negate `HEADING_OFFSET`, re-run. That's the only likely gotcha.
@@ -62,6 +75,12 @@ To stop safely, just stop the rover — the mission stays open and a restart res
 - Chrome errors → fix `CHROME_EXECUTABLE_PATH`; SDK needs Chrome 143+.
 - Follower turns in place forever → heading sign/offset wrong → redo calibration + sign check.
 - Overshoots checkpoints → lower `CRUISE`, raise `KP_ANG`, or widen `CHECKPOINT_RADIUS_M`.
+- Rover wedged on a curb → it now backs up and turns by itself (up to `RECOVERY_TRIES`), then
+  tries approaching from `RECOVERY_OFFSET_M` to the side. Watch for
+  `recording an intervention and stopping` — that is the point a human is needed.
+- **Keep clearance behind the rover.** Recovery reverses at `RECOVERY_REVERSE_THROTTLE` for
+  `RECOVERY_REVERSE_S` with no rear obstacle sensing (there is a rear camera; nothing reads it
+  yet). Set `RECOVERY_REVERSE_S=0` to disable reversing if the site is tight.
 
 ## After the baseline drives
 Camera sidewalk-keeping (Urban) trained on FrodoBots-2K / Berkeley-FrodoBots-7K — the piece
