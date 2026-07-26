@@ -1,1 +1,4 @@
+# Runtime deps for GPS-only navigation — the follower, the client, the watchdog.
+# Tests:   pip install -r requirements-dev.txt
+# --vision: pip install -r vision/requirements.txt   (torch, torchvision, pillow, ...)
 requests>=2.31
