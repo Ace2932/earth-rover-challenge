@@ -60,7 +60,10 @@ The fake server reproduces the SDK's real responses, including the `400` with
 - **Heading estimation (`heading.py`):** a complementary filter. Yaw is dead-reckoned
   between fixes (gyro if trusted, else the commanded angular); corrections come only from a
   GPS course measured over an **odometry** baseline of `HEADING_MIN_MOVE_M`, rejected if the
-  rover turned while covering it or if the wheels moved but the GPS did not. The magnetometer
+  wheels moved but the GPS did not. A chord measured across a turn is the AVERAGE heading
+  over the window, so it is de-biased by half the turn rather than discarded — discarding it
+  meant no correction ever landed above ~3.4 deg/s of turn, and the rover orbited checkpoints
+  (#44). The magnetometer
   seeds the filter once and is never read again. Under sigma=1.5 m GPS noise this holds
   ~2 deg median heading error; taking the course over a short baseline (the previous design)
   gave ~88 deg and preferred it over the magnetometer 93% of the time.
