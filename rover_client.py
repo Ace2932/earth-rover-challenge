@@ -17,7 +17,7 @@ Endpoints (verified against the SDK's main.py):
   POST /start-mission
   GET  /checkpoints-list -> {checkpoints_list:[{sequence,latitude,longitude}], ...}
   POST /checkpoint-reached -> 200 {..next_checkpoint_sequence} | 400 {detail:{error,proximate_distance_to_checkpoint}}
-  POST /end-mission
+  POST /end-mission       -> DESTRUCTIVE: discards all mission progress
 """
 import base64
 import time
@@ -120,7 +120,24 @@ class RoverClient:
             detail = {}
         return (r.status_code == 200), detail
 
-    def end_mission(self):
+    def emergency_abort_lose_all_progress(self, confirm=False):
+        """POST /end-mission. The SDK's own words:
+
+            "This endpoint should only be used in case of emergency. If you run
+             this endpoint you will lose all your progress."
+
+        Every checkpoint already confirmed by the server is discarded. There is no
+        undo, and the mission cannot be resumed afterwards — so this is deliberately
+        not something you can reach by autocompleting `end_`.
+
+        Nothing in this repo calls it. Prefer just stopping the rover
+        (`control(0, 0)`) and leaving the mission open, so a restart can resume.
+        """
+        if not confirm:
+            raise RuntimeError(
+                "emergency_abort_lose_all_progress() discards every checkpoint "
+                "reached so far and cannot be undone. Pass confirm=True if that is "
+                "genuinely what you want.")
         try:
             return self._req("POST", "/end-mission").json()
         except requests.RequestException:
