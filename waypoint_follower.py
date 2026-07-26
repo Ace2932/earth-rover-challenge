@@ -24,6 +24,7 @@ import os
 import time
 from dataclasses import dataclass
 
+from envcfg import coerce
 from geo import haversine_m, bearing_deg, wrap180
 from heading import HeadingEstimator
 from telemetry import Guard
@@ -58,6 +59,9 @@ class Config:
     gps_signal_poor: float = 5.0
     min_speed_scale: float = 0.3       # slowest we will crawl on a bad fix
     no_motion_s: float = 4.0           # commanded to move this long with no wheel motion
+    # --- surviving a bad 4G link ---
+    max_consecutive_errors: int = 20   # give up only after this many in a row
+    stop_attempts: int = 10            # tries to get the rover stopped on the way out
     # --- heading estimation (see heading.py) ---
     heading_min_move_m: float = 8.0    # ODOMETRY baseline a course needs to beat the noise
     heading_max_turn_deg: float = 30.0 # reject a course if we turned this much covering it
@@ -78,11 +82,17 @@ class Config:
 
     @classmethod
     def from_env(cls):
+        """Every field is overridable by its UPPERCASE name. See envcfg.coerce for
+        why this does not just call `type(current)(value)`."""
         c = cls()
         for f in c.__dataclass_fields__:
             env = os.getenv(f.upper())
-            if env is not None:
-                setattr(c, f, type(getattr(c, f))(env))
+            if env is None:
+                continue
+            try:
+                setattr(c, f, coerce(getattr(c, f), env))
+            except ValueError as e:
+                raise ValueError(f"{f.upper()}: {e}") from None
         return c
 
 
@@ -236,6 +246,23 @@ def _fuse(gps_ang, vis_ang, gps_lin, vis_lin, alpha=0.5):
     return max(0.0, min(gps_lin, vis_lin)), clamp(alpha * gps_ang + (1 - alpha) * vis_ang, -1, 1)
 
 
+def safe_stop(io, cfg):
+    """Stop the rover, retrying, swallowing everything.
+
+    This runs in a `finally`. If it raises it does two bad things at once: it masks
+    whatever actually went wrong, and it leaves the rover holding its last command
+    — which on a bad link is exactly when the stop matters most.
+    """
+    for _ in range(getattr(cfg, "stop_attempts", 10)):
+        try:
+            io.control(0, 0)
+            return True
+        except Exception:
+            time.sleep(0.05)
+    print("[follower] WARNING: could not stop the rover — stop it manually")
+    return False
+
+
 def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     wps, start = io.waypoints(route_file)
     if not wps:
@@ -256,12 +283,25 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     prev_lin = 0.0
     warned_no_motion = False
     aborted = False
+    errors = 0                      # consecutive failed steps
     try:
         while i < len(wps):
             now = time.time()
             if now - t0 > cfg.max_runtime_s:
                 print("[follower] max runtime hit"); break
-            lat, lon, heading = io.get_pose()
+            try:
+                lat, lon, heading = io.get_pose()
+            except Exception as e:
+                errors += 1
+                if errors >= cfg.max_consecutive_errors:
+                    print(f"[follower] link is down ({errors} failures in a row): {e}")
+                    break
+                # A skipped step is safe: the commander's setpoint decays to a stop.
+                if errors == 1:
+                    print(f"[follower] telemetry failed, retrying: {e}")
+                if not is_mock:
+                    time.sleep(period)
+                continue
             tlat, tlon = wps[i]
             dist = haversine_m(lat, lon, tlat, tlon)
             brg = bearing_deg(lat, lon, tlat, tlon)
@@ -310,7 +350,14 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                         linear, angular = _fuse(angular, vang, linear, vlin)
             angular = clamp(angular, prev_ang - cfg.max_dang, prev_ang + cfg.max_dang)  # slew
             prev_ang, prev_lin = angular, linear
-            io.control(linear, angular)
+            try:
+                io.control(linear, angular)
+                errors = 0                      # a full clean step
+            except Exception as e:
+                errors += 1
+                if errors >= cfg.max_consecutive_errors:
+                    print(f"[follower] link is down ({errors} failures in a row): {e}")
+                    break
 
             if logger:
                 logger.row(t=now - t0, wp=i + 1, lat=lat, lon=lon, heading=heading,
@@ -323,11 +370,12 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             if not is_mock:
                 time.sleep(period)
     finally:
-        io.control(0, 0)              # ALWAYS stop the rover, even on crash/ctrl-c
+        safe_stop(io, cfg)            # ALWAYS stop the rover, even on crash/ctrl-c
         if logger:
             logger.close()
-    done = i >= len(wps) and not aborted
-    done = bool(wps) and i >= len(wps)
+    # A telemetry abort (flat battery) is not a completed mission, and an empty
+    # route was never a mission at all.
+    done = bool(wps) and i >= len(wps) and not aborted
     print(f"[follower] {'COMPLETE' if done else 'STOPPED'} — {i}/{len(wps)} waypoints, {step} steps")
     return done
 
@@ -339,7 +387,7 @@ def _load_vision(ckpt_path):
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vision"))
     from policy import SidewalkPolicy
-    ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ck = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model = SidewalkPolicy(backbone=ck["backbone"])
     model.load_state_dict(ck["state_dict"])
     size = ck["img"]
