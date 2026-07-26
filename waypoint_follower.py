@@ -442,8 +442,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     period = 1.0 / cfg.loop_hz
     i, step = start, 0
     prev_ang = 0.0
-    best_dist, t_best = math.inf, time.time()
-    t0 = time.time()
+    best_dist, t_best = math.inf, time.monotonic()
+    t0 = time.monotonic()
     last_reach_try = 0.0
     blocked_gate = BlockedGate(cfg)
     blocked_now = False
@@ -459,7 +459,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     errors = 0                      # consecutive failed steps
     try:
         while i < len(wps):
-            now = time.time()
+            now = time.monotonic()
             if now - t0 > cfg.max_runtime_s:
                 print("[follower] max runtime hit"); break
             try:
@@ -486,8 +486,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     best_dist, t_best, prev_ang = math.inf, now, 0.0
                 step += 1
                 if not is_mock:
-                    deadline = max(deadline + period, time.time() - period)
-                    time.sleep(max(0.0, deadline - time.time()))
+                    deadline = max(deadline + period, time.monotonic() - period)
+                    time.sleep(max(0.0, deadline - time.monotonic()))
                 continue
 
             if detour and (now > detour[2] or
@@ -520,7 +520,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     safe_stop(io, cfg)
                     print(f"[follower] reached wp {i+1}/{len(wps)} (dist {dist:.1f}m, step {step})")
                     i += 1
-                    prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
+                    prev_ang, best_dist, t_best = 0.0, math.inf, time.monotonic()
                     sdist, sdist_t = None, 0.0
                     rec = Recovery(cfg)          # fresh budget for the next leg
                     detour = None
@@ -549,8 +549,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                     print("[follower] position fix has not updated — stopping")
                     break
                 if not is_mock:
-                    deadline = max(deadline + period, time.time() - period)
-                    time.sleep(max(0.0, deadline - time.time()))
+                    deadline = max(deadline + period, time.monotonic() - period)
+                    time.sleep(max(0.0, deadline - time.monotonic()))
                 continue
 
             if verdict.no_motion and not warned_no_motion:
@@ -658,8 +658,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             if not is_mock:
                 # Hold the loop rate: sleeping a fixed period AFTER the work makes the
                 # real rate `period + work`, which drifts as the link slows down.
-                deadline = max(deadline + period, time.time() - period)
-                time.sleep(max(0.0, deadline - time.time()))
+                deadline = max(deadline + period, time.monotonic() - period)
+                time.sleep(max(0.0, deadline - time.monotonic()))
     finally:
         # ALWAYS stop the rover — crash, Ctrl-C, or a clean finish. A backend with a
         # Commander does the hardened version (retried stop plus a telemetry read-back

@@ -25,7 +25,7 @@ class StaleDetector:
     False once telemetry has stopped advancing for `stale_s`, and calls
     `restart` at most once per `cooldown_s`."""
 
-    def __init__(self, stale_s=10.0, cooldown_s=60.0, clock=time.time, restart=None):
+    def __init__(self, stale_s=10.0, cooldown_s=60.0, clock=time.monotonic, restart=None):
         self.stale_s = stale_s
         self.cooldown_s = cooldown_s
         self.clock = clock

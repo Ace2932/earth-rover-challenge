@@ -27,13 +27,15 @@ import time
 class Watchdog:
     """One `tick()` per poll interval. Returns False when it is time to exit."""
 
-    def __init__(self, stop, heartbeat_mtime, clock=time.time, timeout_s=1.0):
+    def __init__(self, stop, heartbeat_mtime, clock=time.monotonic, timeout_s=1.0):
         self.stop = stop
         self.heartbeat_mtime = heartbeat_mtime
-        self.clock = clock
+        self.clock = clock                    # monotonic: durations only
         self.timeout_s = timeout_s
         self.seen = False          # has the heartbeat ever existed?
         self.stops = 0
+        self.last_mtime = None     # last mtime we saw
+        self.last_change = None    # when it last changed, by OUR monotonic clock
 
     def tick(self):
         mtime = self.heartbeat_mtime()
@@ -42,7 +44,15 @@ class Watchdog:
                 return True        # follower has not started yet; wait
             return False           # it removed the file: clean shutdown
         self.seen = True
-        if self.clock() - mtime > self.timeout_s:
+        # Judge the heartbeat by whether it is ADVANCING, timed with a monotonic
+        # clock — never by `now - mtime`. That mtime is stamped by the OS with the
+        # wall clock, so a forward NTP step would read as "dead for a minute" and
+        # brake a healthy rover, and a backward step would make the difference
+        # negative so the backstop goes silent exactly when it is needed (#67).
+        now = self.clock()
+        if mtime != self.last_mtime:
+            self.last_mtime, self.last_change = mtime, now
+        elif self.last_change is not None and now - self.last_change > self.timeout_s:
             self.stop()
             self.stops += 1
         return True

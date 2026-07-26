@@ -42,9 +42,9 @@ def collect(client, secs, hz=5.0, throttle=0.5, stop_attempts=10, stop_gap_s=0.0
     rover rolling forward at `throttle` with the process gone.
     """
     samples = []
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
-        while time.time() - t0 < secs:
+        while time.monotonic() - t0 < secs:
             d = client.get_data()
             samples.append((float(d["latitude"]), float(d["longitude"]),
                             float(d["orientation"])))

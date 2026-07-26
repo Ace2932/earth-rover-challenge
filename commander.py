@@ -21,7 +21,7 @@ import time
 
 class Commander:
     def __init__(self, send, hz=20.0, stale_s=0.5, heartbeat_path=None,
-                 stop_attempts=10, stop_gap_s=0.05, clock=time.time):
+                 stop_attempts=10, stop_gap_s=0.05, clock=time.monotonic):
         """send(linear, angular): may block or raise; the thread absorbs both."""
         self.send = send
         self.period = 1.0 / max(1e-6, hz)
@@ -101,13 +101,13 @@ class Commander:
             return
         try:
             with open(self.heartbeat_path, "w") as f:
-                f.write(str(self.clock()))
+                f.write(str(time.time()))   # wall-clock: for a human reading the file
         except OSError:
             pass
 
     def _loop(self):
         while not self._stop_flag.is_set():
-            started = time.time()
+            started = self.clock()
             linear, angular = self._current()
             try:
                 self.send(linear, angular)
@@ -116,4 +116,4 @@ class Commander:
                 self._touch_heartbeat()
             except Exception:
                 self.failures += 1
-            self._stop_flag.wait(max(0.0, self.period - (time.time() - started)))
+            self._stop_flag.wait(max(0.0, self.period - (self.clock() - started)))
