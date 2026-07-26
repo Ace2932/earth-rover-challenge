@@ -27,6 +27,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+from blocked import BlockedGate
 from envcfg import coerce
 from geo import haversine_m, bearing_deg, wrap180
 from heading import HeadingEstimator
@@ -61,6 +62,10 @@ class Config:
     stuck_s: float = 20.0              # no progress this long -> stuck
     max_runtime_s: float = 3600.0
 
+    # --- obstacle stop (needs a policy with a blocked head; see blocked.py) ---
+    blocked_p: float = 0.8             # probability to call the path blocked; 1.0 = off
+    blocked_frames: int = 2            # consecutive frames before braking
+    blocked_hold_s: float = 1.5        # hold the stop this long (anti-chatter)
     # --- telemetry guards (see telemetry.py) ---
     battery_abort_pct: float = 15.0    # park rather than die somewhere inconvenient
     battery_warn_pct: float = 30.0
@@ -419,6 +424,8 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
     best_dist, t_best = math.inf, time.time()
     t0 = time.time()
     last_reach_try = 0.0
+    blocked_gate = BlockedGate(cfg)
+    blocked_now = False
     guard = Guard(cfg)
     prev_lin = 0.0
     warned_no_motion = False
@@ -567,13 +574,30 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                         warned_stale_frames = True
                         print("[follower] camera frames are stale — GPS-only steering")
                 else:
-                    vlin, vang, vconf = vision_fn(vf)
+                    # Four values, because confidence and P(blocked) are different
+                    # questions: "how much should this steer us" versus "may we go
+                    # forward at all". Merging them would let a confident stop read as
+                    # a confident steer.
+                    vlin, vang, vconf, vblocked = vision_fn(vf)
                     alpha = fuse_gate(err, vconf, cfg) if vlin is not None else 0.0
                     vsrc = f"a{alpha:.2f}"
                     if alpha > 0:
                         linear, angular = _fuse(angular, vang, linear, vlin,
                                                 alpha=alpha,
                                                 min_linear=cfg.vision_min_linear)
+                    # After fusion: a stop overrides whatever the blend produced, and
+                    # is not subject to VISION_MIN_LINEAR's floor.
+                    if blocked_gate.update(vblocked, now):
+                        # Steering still applies — stopped and pointed the right way
+                        # beats stopped and lost.
+                        linear = 0.0
+                        vsrc = "blocked"
+                        if not blocked_now:
+                            blocked_now = True
+                            print(f"[follower] BLOCKED (p={vblocked:.2f}) — holding")
+                    elif blocked_now:
+                        blocked_now = False
+                        print("[follower] path clear — resuming")
             angular = clamp(angular, prev_ang - cfg.max_dang, prev_ang + cfg.max_dang)  # slew
             prev_ang, prev_lin = angular, linear
             try:
@@ -647,22 +671,29 @@ def _load_vision(ckpt_path):
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vision"))
     from policy import SidewalkPolicy
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    model = SidewalkPolicy(backbone=ck["backbone"])
+    model = SidewalkPolicy(backbone=ck["backbone"],
+                           blocked_head=bool(ck.get("blocked_head")))
     model.load_state_dict(ck["state_dict"])
     size = ck["img"]
 
     def infer(frame_bytes):
-        """Return (linear, angular, confidence). The current policy has no
-        uncertainty output, so confidence is 1.0 — a real signal needs the second
-        head from #7. The err-gate and VISION_ALPHA still apply either way."""
+        """Return (linear, angular, confidence, p_blocked).
+
+        Confidence and P(blocked) are deliberately separate: "how much should this
+        steer us" and "may we go forward at all" are different questions, and folding
+        them together would let a confident stop read as a confident steer.
+        """
         try:
             im = Image.open(BytesIO(frame_bytes)).convert("RGB").resize((size, size))
         except Exception:
-            return None, None, 0.0
+            return None, None, 0.0, None
         t = torch.tensor(list(im.getdata()), dtype=torch.float32).view(size, size, 3)
         t = (t / 255.0).permute(2, 0, 1)
-        lin, ang = model.act(t)
-        return lin, ang, 1.0
+        lin, ang, p_blocked = model.act(t)
+        # Confidence and P(blocked) are separate answers. There is no uncertainty head
+        # yet, so confidence is 1.0 and the err-gate plus VISION_ALPHA do the gating
+        # (#11); p_blocked is None unless the checkpoint carries the stop head (#7).
+        return lin, ang, 1.0, p_blocked
     return infer
 
 

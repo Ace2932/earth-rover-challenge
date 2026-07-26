@@ -30,7 +30,14 @@ class TinyBackbone(nn.Module):
 
 
 class SidewalkPolicy(nn.Module):
-    def __init__(self, backbone="tiny", action_dim=2):
+    def __init__(self, backbone="tiny", action_dim=2, blocked_head=False):
+        """blocked_head adds a second output: P(path ahead is blocked).
+
+        Kept separate from the action regression on purpose. Steering is a
+        continuous fit; "can I go forward" is a decision, needs its own loss, and
+        must survive being wrong in only one direction — a false stop costs time,
+        a missed stop costs a pedestrian.
+        """
         super().__init__()
         if backbone == "tiny":
             self.backbone = TinyBackbone()
@@ -46,15 +53,27 @@ class SidewalkPolicy(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(feat, 64), nn.ReLU(), nn.Linear(64, action_dim)
         )
+        self.blocked = (nn.Sequential(nn.Linear(feat, 64), nn.ReLU(), nn.Linear(64, 1))
+                        if blocked_head else None)
 
     def forward(self, x):
-        return self.head(self.backbone(x))
+        f = self.backbone(x)
+        action = self.head(f)
+        return (action, self.blocked(f)) if self.blocked is not None else action
 
     @torch.no_grad()
     def act(self, img_chw, device="cpu"):
-        """img_chw: float tensor [3,H,W] in 0..1 -> (linear, angular) clamped."""
+        """img_chw: float tensor [3,H,W] in 0..1 -> (linear, angular, p_blocked).
+
+        p_blocked is None for a checkpoint without the head — "no opinion", which
+        the follower's gate treats as "never brake". Old two-output checkpoints
+        keep loading unchanged.
+        """
         self.eval()
-        out = self(img_chw.unsqueeze(0).to(device))[0]
-        linear = float(out[0].clamp(0, 1))
-        angular = float(out[1].clamp(-1, 1))
-        return linear, angular
+        out = self(img_chw.unsqueeze(0).to(device))
+        action, logit = out if isinstance(out, tuple) else (out, None)
+        action = action[0]
+        linear = float(action[0].clamp(0, 1))
+        angular = float(action[1].clamp(-1, 1))
+        p = None if logit is None else float(torch.sigmoid(logit[0][0]))
+        return linear, angular, p

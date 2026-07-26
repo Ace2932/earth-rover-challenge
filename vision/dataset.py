@@ -103,9 +103,16 @@ class FrodoBots2KDataset(Dataset):
     ride_dirs: a ride dir, list of ride dirs, or a dataset root (auto-discovered).
     """
     def __init__(self, ride_dirs, img_size=96, stride=4, cache_dir=None,
-                 drop_idle=True, max_frames_per_ride=None, tolerance=0.2):
+                 drop_idle=True, max_frames_per_ride=None, tolerance=0.2,
+                 with_blocked=False):
+        """with_blocked additionally yields a weak "the human braked here" label
+        (see blocked.blocked_labels). It implies drop_idle=False: the frames where
+        the rover is stopped are exactly the positives."""
         self.img_size = img_size
-        self.samples = []       # list of (jpg_path, action float32[2])
+        self.with_blocked = with_blocked
+        if with_blocked:
+            drop_idle = False
+        self.samples = []       # list of (jpg_path, action float32[2], blocked)
         self._build(ride_dirs, stride, cache_dir, drop_idle,
                     max_frames_per_ride, tolerance)
 
@@ -136,6 +143,14 @@ class FrodoBots2KDataset(Dataset):
             merged = pd.merge_asof(ts, ctrl, on="timestamp",
                                    direction="nearest", tolerance=tolerance) \
                 .dropna(subset=["linear", "angular"])
+            # Weak obstacle supervision, computed on the FULL 10 Hz control track
+            # before subsampling, so a brake event is not stepped over.
+            if self.with_blocked:
+                import sys as _sys, os as _os
+                _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
+                    _os.path.abspath(__file__))))
+                from blocked import blocked_labels
+                merged["blocked"] = blocked_labels(list(merged["linear"]), hz=20.0)
             merged = merged.iloc[::stride]
             if drop_idle:
                 moving = (merged["linear"].abs() > 0.05) | (merged["angular"].abs() > 0.05)
@@ -143,7 +158,8 @@ class FrodoBots2KDataset(Dataset):
             if max_frames_per_ride:
                 merged = merged.iloc[:max_frames_per_ride]
 
-            wanted = {int(r.frame_id): (float(r.linear), float(r.angular))
+            wanted = {int(r.frame_id): (float(r.linear), float(r.angular),
+                                        int(getattr(r, "blocked", 0)))
                       for r in merged.itertuples()}
             if not wanted:
                 continue
@@ -158,8 +174,9 @@ class FrodoBots2KDataset(Dataset):
                     jpg = os.path.join(cache, f"{rid}_{idx:06d}_{self.img_size}.jpg")
                     if not os.path.exists(jpg):
                         cv2.imwrite(jpg, cv2.resize(frame, (self.img_size, self.img_size)))
-                    lin, ang = wanted[idx]
-                    self.samples.append((jpg, np.array([lin, ang], dtype=np.float32)))
+                    lin, ang, blk = wanted[idx]
+                    self.samples.append((jpg, np.array([lin, ang], dtype=np.float32),
+                                         np.float32(blk)))
                 idx += 1
                 ok, frame = cap.read()
             cap.release()
@@ -175,7 +192,9 @@ class FrodoBots2KDataset(Dataset):
     def __getitem__(self, i):
         import cv2
         import torch as _torch
-        jpg, action = self.samples[i]
+        jpg, action, blocked = self.samples[i]
         img = cv2.cvtColor(cv2.imread(jpg), cv2.COLOR_BGR2RGB)
         t = _torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
+        if self.with_blocked:
+            return t, _torch.from_numpy(action), _torch.tensor(blocked)
         return t, _torch.from_numpy(action)

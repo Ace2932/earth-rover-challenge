@@ -97,6 +97,11 @@ The fake server reproduces the SDK's real responses, including the `400` with
   or an empty checkpoint list aborts with `MissionUnavailable` instead of reporting
   `COMPLETE — 0/0`. Checkpoints are ordered by `sequence`, and a restart resumes from the
   server's `latest_scanned_checkpoint` rather than driving the whole route again.
+- **Obstacle stop (`blocked.py`):** a second policy head predicts "path blocked" and forces
+  `linear=0`, with hysteresis in both directions — one noisy frame cannot brake the rover, and
+  the stop is held so it cannot chatter at a pedestrian. It fails open: no probability (no head,
+  failed inference) never brakes. The head is trained but **not yet trustworthy** — see
+  `vision/README.md` for the measured numbers.
 - **Telemetry guards (`telemetry.py`):** `/data` carries more than a position. The loop now
   parks below `BATTERY_ABORT_PCT` rather than dying somewhere inconvenient, scales speed down
   between `GPS_SIGNAL_POOR` and `GPS_SIGNAL_GOOD`, and flags "commanded to move, no wheel
