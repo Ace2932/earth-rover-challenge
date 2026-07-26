@@ -469,8 +469,10 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 best_dist, t_best = math.inf, now
                 sdist, sdist_t = None, 0.0         # target changed; ask again
 
+            # The detour point IS the target while one is set — #52 had this line
+            # overwritten by `tlat, tlon = wps[i]` in a silent auto-merge, which made
+            # the whole detour a 45-second no-op driving at the obstacle.
             tlat, tlon = detour[:2] if detour else wps[i]
-            tlat, tlon = wps[i]
             dist = haversine_m(lat, lon, tlat, tlon)
             brg = bearing_deg(lat, lon, tlat, tlon)
 

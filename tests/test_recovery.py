@@ -192,3 +192,30 @@ def test_a_stale_server_distance_is_not_usable():
 
 def test_no_server_distance_is_not_usable():
     assert server_distance_usable(None, None, 0.0, cfg()) is False
+
+
+def test_the_rover_is_actually_steered_toward_the_detour_point(tmp_path):
+    """Issue #52. The other detour test asserts the rover stops POLLING during a
+    detour — a negative that survives the feature being deleted entirely. This
+    asserts the positive, via the run log's own `bearing` column.
+
+    The rover sits due south of the checkpoint and never moves, so the bearing to
+    the checkpoint is exactly 0 for the whole run. The detour point is offset 8 m to
+    the side, which is ~15 deg off. So a non-zero bearing anywhere in the log means
+    the rover was steered at the detour; all-zero means it was still steering at the
+    checkpoint the recovery ladder just failed to reach.
+    """
+    from waypoint_follower import RunLogger
+
+    log = tmp_path / "run.csv"
+    io = WedgedIO(dist_m=30.0)
+    run(io, cfg(recovery_tries=1, recovery_offset_m=8.0, checkpoint_radius_m=5.0,
+                stuck_s=1.0, max_runtime_s=8.0), logger=RunLogger(str(log)))
+
+    rows = [r.split(",") for r in log.read_text().strip().split("\n")[1:]]
+    bearings = [float(r[8]) for r in rows if r[8]]
+    assert bearings, "no rows logged"
+    off_axis = [b for b in bearings if 5.0 < b < 90.0]
+    assert off_axis, (
+        f"every logged bearing was straight at the checkpoint ({set(round(b) for b in bearings)}) "
+        f"— the detour target was never used")
