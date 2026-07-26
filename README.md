@@ -62,7 +62,8 @@ The fake server reproduces the SDK's real responses, including the `400` with
 - **Out-of-process watchdog (`watchdog.py`, `--watchdog`):** `try/finally` cannot survive
   `kill -9`, an OOM, or the laptop sleeping, and the rover latches its last command. A second
   process watches a heartbeat and stops the rover if it goes stale. Verified: `kill -9` on the
-  follower produced a stop **1.07 s** later and zero false stops while healthy.
+  follower produced a stop **1.07 s** later and zero false stops while healthy. Whether the bot's
+  own firmware zeroes on link loss is still unconfirmed — see the runbook's first-session check.
 - **Hardened stop:** on exit the stop is retried, and the telemetry is read back to confirm
   `speed` actually fell to zero — an HTTP 200 is not evidence the rover stopped.
 - **Request resilience:** `RoverClient` retries with backoff, and the control loop tolerates
