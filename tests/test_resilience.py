@@ -102,3 +102,42 @@ def test_a_stop_that_can_never_succeed_does_not_propagate():
             raise RuntimeError("link is gone")
 
     run(DeadIO(fail_every=0), cfg(stop_attempts=3))   # must not raise
+
+
+def test_a_failure_on_the_checkpoint_stop_does_not_end_the_run():
+    """The stop issued the instant a checkpoint is confirmed was unguarded, so a 503
+    arriving right then killed the run — at the most expensive possible moment, just
+    after the progress was earned. No earlier test exercised this path (#48)."""
+    class ReachingIO(FlakyIO):
+        """Confirms the checkpoint, but the stop command that follows fails."""
+
+        def __init__(self):
+            super().__init__(fail_every=0)
+            self.reached_calls = 0
+
+        def waypoints(self, route_file):
+            return [(37.8719, -122.2585), (37.8720, -122.2585)], 0
+
+        def reached(self):
+            self.reached_calls += 1
+            return True, {}
+
+        def control(self, linear, angular):
+            if linear == 0 and angular == 0 and self.reached_calls:
+                raise RuntimeError("503 Server Error: /control")
+            self.commands.append((linear, angular))
+
+    io = ReachingIO()
+    run(io, cfg())                       # must not raise
+    assert io.reached_calls >= 1
+
+
+def test_the_empty_route_refusal_does_not_raise_either():
+    class NoRouteIO(FlakyIO):
+        def waypoints(self, route_file):
+            return [], 0
+
+        def control(self, linear, angular):
+            raise RuntimeError("503 Server Error: /control")
+
+    assert run(NoRouteIO(), cfg()) is False      # must not raise

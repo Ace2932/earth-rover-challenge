@@ -265,7 +265,7 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
         # Never report success for a route we never had. An empty list here means
         # the mission never started (see MissionUnavailable).
         print("[follower] no waypoints — refusing to run")
-        io.control(0, 0)
+        safe_stop(io, cfg)
         return False
     print(f"[follower] {len(wps)} waypoints, starting at {start + 1}")
     is_mock = isinstance(io, MockIO)
@@ -313,7 +313,10 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 last_reach_try = now
                 ok, detail = io.reached()
                 if ok:
-                    io.control(0, 0)
+                    # Retried and swallowed: a dropped stop command must not cost us a
+                    # checkpoint the server has already confirmed (#48). The next
+                    # iteration commands again regardless.
+                    safe_stop(io, cfg)
                     print(f"[follower] reached wp {i+1}/{len(wps)} (dist {dist:.1f}m, step {step})")
                     i += 1
                     prev_ang, best_dist, t_best = 0.0, math.inf, time.time()
