@@ -50,6 +50,11 @@ class SimConfig:
     start_heading: float = 0.0
     max_speed: float = 1.5              # m/s at linear=1
     max_yaw: float = 90.0               # deg/s at angular=1
+    # The bot does not turn exactly as commanded, and the follower dead-reckons yaw
+    # between GPS course fixes. With both using the same equation, dead reckoning is
+    # perfect and free — which flatters every result that rests on this sim (#56).
+    yaw_scale: float = 1.0              # gain error: an uncalibrated YAW_RATE_DPS
+    yaw_noise_dps: float = 0.0          # per-step yaw error: slip, surface, camber
 
     accept_radius_m: float = 15.0       # challenge Urban tolerance
     gps_sigma_m: float = 0.0            # per-fix white noise
@@ -111,7 +116,10 @@ class Sim:
         if dt <= 0.0:
             return
         linear, angular = self.cmd
-        self.heading = (self.heading + angular * self.cfg.max_yaw * dt) % 360.0
+        yaw = angular * self.cfg.max_yaw * self.cfg.yaw_scale
+        if self.cfg.yaw_noise_dps:
+            yaw += self.rng.gauss(0.0, self.cfg.yaw_noise_dps)
+        self.heading = (self.heading + yaw * dt) % 360.0
         speed = linear * self.cfg.max_speed
         dn = speed * dt * math.cos(math.radians(self.heading))
         de = speed * dt * math.sin(math.radians(self.heading))
