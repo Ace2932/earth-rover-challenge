@@ -77,7 +77,7 @@ class HeadingEstimator:
         """Fold one telemetry sample in. Returns (heading_deg, source)."""
         if now is None:
             import time
-            now = time.time()
+            now = time.monotonic()
         dt = 0.0 if self.last_t is None else max(0.0, min(2.0, now - self.last_t))
         self.last_t = now
 
