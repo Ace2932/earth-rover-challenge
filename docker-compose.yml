@@ -1,0 +1,21 @@
+# Follower + health watcher. Bring the SDK server up from its own repo alongside
+# this (it needs Chrome; see DEPLOYMENT.md), or point SDK_BASE_URL at wherever it runs.
+services:
+  follower:
+    build: .
+    restart: on-failure          # a crash-restart resumes from latest_scanned_checkpoint
+    environment:
+      SDK_BASE_URL: ${SDK_BASE_URL:-http://sdk:8000}
+    env_file: [.env]
+    volumes:
+      - ./logs:/logs
+    network_mode: ${COMPOSE_NETWORK_MODE:-bridge}
+
+  health:
+    build: .
+    restart: always
+    command: >
+      python health.py --base-url ${SDK_BASE_URL:-http://sdk:8000}
+      --restart-cmd "${SDK_RESTART_CMD:-}"
+    env_file: [.env]
+    network_mode: ${COMPOSE_NETWORK_MODE:-bridge}

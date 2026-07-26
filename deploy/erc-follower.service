@@ -1,0 +1,18 @@
+[Unit]
+Description=Earth Rover Challenge follower
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/earth-rover-challenge
+EnvironmentFile=/opt/earth-rover-challenge/.env
+# --watchdog spawns the out-of-process stopper; a crash-restart resumes the mission
+ExecStart=/opt/earth-rover-challenge/.venv/bin/python waypoint_follower.py --watchdog --log /var/log/erc/run.csv
+Restart=on-failure
+RestartSec=3
+# SIGINT so the follower's finally block runs its hardened stop before exiting
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

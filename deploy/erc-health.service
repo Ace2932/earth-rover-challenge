@@ -1,0 +1,14 @@
+[Unit]
+Description=Earth Rover SDK/Chrome health watcher
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/earth-rover-challenge
+EnvironmentFile=/opt/earth-rover-challenge/.env
+ExecStart=/opt/earth-rover-challenge/.venv/bin/python health.py --restart-cmd "systemctl restart earth-rovers-sdk"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

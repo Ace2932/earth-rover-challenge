@@ -199,3 +199,60 @@ def test_heading_stays_in_0_360():
         h, _ = est.update(37.8719, -122.2585, orientation=0, now=1001.0 + i,
                           cmd_angular=-1.0)
         assert 0.0 <= h < 360.0
+
+
+# ---------------- corrections while turning (issue #44) ----------------
+
+def drive_arc(est, turn_dps, secs=300.0, hz=5.0, sigma=0.0, speed=0.9, seed=0):
+    """Drive a constant-rate arc; return (gps fixes, final |heading error|)."""
+    rng = random.Random(seed)
+    lat, lon, t, truth = 37.8719, -122.2585, 1000.0, 0.0
+    fixes, h = 0, 0.0
+    for _ in range(int(secs * hz)):
+        truth = (truth + turn_dps / hz) % 360.0
+        d = speed / hz
+        lat += d * math.cos(math.radians(truth)) / M_PER_DEG
+        lon += d * math.sin(math.radians(truth)) / (M_PER_DEG * math.cos(math.radians(lat)))
+        t += 1.0 / hz
+        h, src = est.update(lat + rng.gauss(0, sigma) / M_PER_DEG,
+                            lon + rng.gauss(0, sigma) / M_PER_DEG,
+                            orientation=0, now=t, cmd_linear=0.6,
+                            cmd_angular=turn_dps / est.cfg.yaw_rate_dps, speed=speed)
+        fixes += src == "gps"
+    return fixes, abs(wrap180(h - truth))
+
+
+def test_a_gentle_curve_still_gets_gps_corrections():
+    """3.4 deg/s was the old ceiling: above it the turn gate rejected every sample
+    and the filter went permanently blind. A sidewalk course is mostly curves."""
+    fixes, _ = drive_arc(HeadingEstimator(cfg()), turn_dps=5.0)
+    assert fixes > 0
+
+
+def test_an_orbit_gets_gps_corrections():
+    """The CI trace: 12 deg/s, circling a checkpoint, never correcting."""
+    fixes, _ = drive_arc(HeadingEstimator(cfg()), turn_dps=12.0)
+    assert fixes > 0
+
+
+def test_heading_stays_accurate_around_a_curve():
+    """A chord across a turn is not the end heading — it is the AVERAGE heading, so
+    it needs de-biasing by half the turn before it is used as a correction."""
+    _, err = drive_arc(HeadingEstimator(cfg()), turn_dps=8.0, secs=200.0)
+    assert err < 20.0, f"heading drifted to {err:.1f} deg around a curve"
+
+
+def test_a_hard_turn_is_still_rejected():
+    """Past a point the chord really is meaningless — do not correct from it."""
+    est = HeadingEstimator(cfg())
+    fixes, _ = drive_arc(est, turn_dps=60.0, secs=120.0)
+    assert fixes == 0
+
+
+def test_the_filter_cannot_go_blind_indefinitely():
+    """Belt and braces: if nothing has been accepted for a long time while moving,
+    take the next sample anyway rather than dead-reckoning forever."""
+    c = cfg(heading_max_turn_deg=0.0)          # reject everything on turn grounds
+    est = HeadingEstimator(c)
+    fixes, _ = drive_arc(est, turn_dps=2.0, secs=200.0)
+    assert fixes > 0
