@@ -146,6 +146,16 @@ class HeadingEstimator:
             self._reset_anchor(lat, lon, now)          # wheels turning, rover isn't
             return self.heading, source
 
+        # ...and the mirror of that check. The rover cannot have travelled further
+        # than its wheels turned, so a chord longer than the odometry is not motion,
+        # it is the fix having jumped — multipath, which is the defining GPS hazard of
+        # a course that runs between buildings. Left unchecked, a jump landing on the
+        # sample that completes the baseline swung the heading by 51 deg (10 m jump)
+        # or 75 deg (30 m), in a single correction (#61).
+        if chord > self.cfg.heading_jump_ratio * max(self.odo_m, 1e-6):
+            self._reset_anchor(lat, lon, now)
+            return self.heading, source
+
         course = (bearing_deg(alat, alon, lat, lon) + self.turn_signed / 2.0) % 360.0
         # Starved samples are the ones we would normally reject; trust them less.
         gain = self._gain() * (0.5 if starved else 1.0)

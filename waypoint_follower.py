@@ -106,6 +106,7 @@ class Config:
     heading_max_blind_s: float = 20.0  # no correction for this long -> take the next one anyway
     heading_gain: float = 0.25         # floor on the correction gain (see heading._gain)
     heading_slip_ratio: float = 0.75   # GPS chord below this * odometry = wheels slipping
+    heading_jump_ratio: float = 1.5    # chord above this * odometry = the fix jumped (#61)
     heading_anchor_max_age_s: float = 30.0
     max_speed_mps: float = 1.5         # m/s at linear=1.0 (odometry model when telemetry
                                        # gives no `speed`)
