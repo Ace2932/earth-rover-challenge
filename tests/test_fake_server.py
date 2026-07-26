@@ -234,3 +234,49 @@ def test_http_checkpoints_list_is_ordered_and_reports_progress(server):
     seqs = [c["sequence"] for c in body["checkpoints_list"]]
     assert seqs == sorted(seqs)
     assert body["latest_scanned_checkpoint"] == 0
+
+
+# ---------------- the bot does not turn exactly as commanded (issue #56) ----------------
+
+def test_yaw_is_exact_by_default():
+    """The deterministic quick-start must stay deterministic."""
+    s, t = sim_at_start()
+    s.apply_control(0.0, 1.0)
+    t["now"] += 1.0
+    s.apply_control(0.0, 1.0)
+    assert s.heading == pytest.approx(SimConfig().max_yaw, abs=0.01)
+
+
+def test_a_yaw_scale_error_makes_dead_reckoning_wrong():
+    """An uncalibrated YAW_RATE_DPS looks exactly like this: the rover turns more (or
+    less) than commanded, and open-loop dead reckoning drifts without bound."""
+    s, t = sim_at_start(yaw_scale=1.2)
+    s.apply_control(0.0, 1.0)
+    t["now"] += 1.0
+    s.apply_control(0.0, 1.0)
+    assert s.heading == pytest.approx(SimConfig().max_yaw * 1.2, abs=0.01)
+
+
+def test_yaw_noise_accumulates_over_time():
+    """Slip and surface: individually small, unbounded once integrated."""
+    s, t = sim_at_start(yaw_noise_dps=10.0, seed=5)
+    for _ in range(50):
+        s.apply_control(0.5, 0.0)          # driving straight, no turn commanded
+        t["now"] += 0.2
+    assert abs(wrap(s.heading)) > 1.0, "no drift at all from yaw noise"
+
+
+def test_yaw_noise_is_deterministic_for_a_seed():
+    def run(seed):
+        s, t = sim_at_start(yaw_noise_dps=10.0, seed=seed)
+        for _ in range(20):
+            s.apply_control(0.5, 0.0)
+            t["now"] += 0.2
+        return s.heading
+
+    assert run(11) == run(11)
+    assert run(11) != run(12)
+
+
+def wrap(deg):
+    return (deg + 180.0) % 360.0 - 180.0
