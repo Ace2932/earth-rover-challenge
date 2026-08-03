@@ -3,7 +3,35 @@
 Ordered by what blocks what. The code has moved a long way; the things below need your
 accounts, the hardware, or an answer from Frodobots.
 
-Last reviewed: 2026-07-26.
+Last reviewed: 2026-08-03.
+
+## 🟢 You can drive your own bot now — this is the next physical step
+
+Until #79/#80 there was no path: your Mini+ has no `MISSION_SLUG`, and without one the
+SDK's mission API is unusable (`/checkpoints-list` → `{}`, `/checkpoint-reached` → 500), so
+the follower could not run on it at all. Now:
+
+```bash
+export SDK_BASE_URL=http://localhost:8001            # your SDK runs on 8001, not 8000
+
+curl -s $SDK_BASE_URL/data | python3 -m json.tool     # 1. confirm a real GPS lock first
+.venv/bin/python calibrate_heading.py                 # 2. once, ~5 m clear ahead
+.venv/bin/python capture_route.py park_lap.json       # 3. teleop the lap; this cannot drive
+GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0 CRUISE=0.3 \
+  .venv/bin/python waypoint_follower.py --route park_lap.json --watchdog --log run1.csv
+```
+
+Turn the GPS speed governor **off** for run 1 (`GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0`) until
+question 2 below is actually measured. Full sequence in `CALL_DAY_RUNBOOK.md`.
+
+Two real defects came out of auditing the harness against the SDK's documented payload, and
+neither was reachable from the simulator — see "What the harness still cannot tell you":
+
+- **#77** With no lock the bot reports `latitude`/`longitude` 1000 and `fix_quality` 0 while
+  the timestamp keeps advancing, so the frozen-fix check stayed quiet. The follower drove at
+  **full cruise on a 13 267 km phantom bearing for a whole `STUCK_S`**. Now refuses in 0 steps.
+- **#76** `/data`'s `rpms` rows end with a Unix sample timestamp, which `_wheel_motion` read
+  as a spinning wheel. The commanded-vs-actual motion check was **dead on real hardware**.
 
 ## 🔴 Three questions only a real bot can answer
 
@@ -82,6 +110,7 @@ Reviewed and rebuilt across ~30 issues. What exists now, all with tests:
 | `telemetry.py` | Battery floor, GPS-quality speed cap, commanded-vs-actual motion check. |
 | `blocked.py` | Obstacle-stop decision with hysteresis. Inert until a policy carries the head. |
 | `health.py` | Watches `/data`'s timestamp; restarts the SDK server when Chrome wedges silently. |
+| `capture_route.py` | Records a teleop lap into a `--route` file. Read-only — it cannot drive. |
 | `fake_sdk_server.py` | Reproduces the real 400s, GPS noise and bias, telemetry latency, dropped commands, battery drain, and now imperfect yaw. |
 | CI | Unit suite plus a real end-to-end drive, including under 30% injected faults. |
 
@@ -107,6 +136,12 @@ Worth knowing before you read "completes 3/3" as reassurance:
   jumps of tens of metres near buildings, correlated with exactly the places the course goes.
 - **Latency is constant.** Real 4G latency is spiky, and a spike is what turns a stale frame
   into a wrong decision.
+- **The harness can only be as right as our reading of the SDK.** It was written from the
+  same reading the follower was, so where that reading was wrong, both were wrong together
+  and a green suite said nothing: 267 tests passed over #76 and #77. Both were payload-SHAPE
+  divergences — timestamped `rpms` rows, and a no-lock state the harness could not represent.
+  #78 pins the shape against the SDK's documented response, but the general lesson stands:
+  **check the harness against the real thing, not against what the code expects.**
 
 None of that makes the rehearsal worthless — it caught two real bugs. It means "it completed
 in sim" is evidence about the code, not about the rover.

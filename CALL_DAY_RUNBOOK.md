@@ -30,6 +30,41 @@ export HEADING_SCALE=... HEADING_OFFSET=... HEADING_SIGN=...
 .venv/bin/python waypoint_follower.py         # waypoints from /checkpoints-list
 ```
 
+## Driving YOUR OWN bot (no mission) — the offline route path
+Your Mini+ has no `MISSION_SLUG`, and without one the SDK's mission API is unusable:
+`/checkpoints-list` returns `{}` and `/checkpoint-reached` answers `500`. So the default
+invocation cannot run at all on it. Use a route you record yourself.
+
+```bash
+# 0. SDK server on 8001 (Motif's uvicorn owns 8000 on this laptop)
+export SDK_BASE_URL=http://localhost:8001
+
+# 1. FIRST outdoor telemetry check — before anything drives
+curl -s $SDK_BASE_URL/data | python3 -m json.tool | head -20
+#    latitude/longitude of 1000 and fix_quality 0 mean NO LOCK. The follower now refuses
+#    to drive on that (#77) rather than steering on a 13 000 km phantom bearing — but you
+#    still want a lock before you start. Note gps_signal here vs indoors: that measurement
+#    is one of the three open unknowns.
+
+# 2. calibrate heading ONCE, ~5 m clear ahead
+.venv/bin/python calibrate_heading.py        # export the HEADING_SCALE/OFFSET/SIGN it prints
+
+# 3. teleop the route once while recording (this tool only READS, it cannot drive)
+.venv/bin/python capture_route.py park_lap.json      # Ctrl-C when the lap is done
+
+# 4. drive it autonomously, governor OFF and slow
+GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0 CRUISE=0.3 \
+  .venv/bin/python waypoint_follower.py --route park_lap.json --watchdog --log run1.csv
+```
+
+`GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0` disables the speed governor. Do this on run 1: the
+units of `gps_signal` are still unmeasured, and the bench read **16 with zero GPS fix**, so
+the shipped thresholds are a guess that could crawl the whole run.
+
+Arrival on a route file is **local** — within `LOCAL_ARRIVE_M` (5 m) of our own fix, and no
+checkpoint is claimed. It is the only thing that works without a mission, and it proves less
+than a mission run does: the judge of arrival is the same fix you are steering on.
+
 ## ⚠️ First live session: find out whether the bot has its own watchdog
 Send a command, kill the client hard, and watch:
 ```bash

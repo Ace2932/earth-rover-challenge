@@ -42,9 +42,11 @@ def test_every_follower_key_maps_to_a_real_config_field():
     """A typo'd key is silently ignored by Config.from_env, so the example file is
     the only place it can be caught."""
     fields = {f.upper() for f in Config().__dataclass_fields__}
-    # keys the SDK server and the fake server own, not Config
+    # keys another tool owns, not the follower's Config: the SDK server, the fake
+    # server (FAKE_*, skipped below) and capture_route.py
     external = {"SDK_API_TOKEN", "BOT_SLUG", "CHROME_EXECUTABLE_PATH", "MISSION_SLUG",
-                "SDK_BASE_URL", "HEARTBEAT_PATH"}
+                "SDK_BASE_URL", "HEARTBEAT_PATH",
+                "CAPTURE_HZ", "CAPTURE_SPACING_M"}
     unknown = [k for k, _ in assignments()
                if k not in fields and k not in external and not k.startswith("FAKE_")]
     assert not unknown, f"not Config fields and not external: {unknown}"
