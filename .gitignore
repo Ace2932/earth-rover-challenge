@@ -6,3 +6,11 @@ frames/
 *.pt
 data/
 logs/
+# The SDK checkout lives here during live work and holds SDK_API_TOKEN in its own
+# .env. Git already treats it as an embedded repo and it ships its own .gitignore,
+# so the token is doubly covered — this is the third layer, on a PUBLIC repo.
+earth-rovers-sdk/
+# Camera frames pulled during bring-up
+front*.png
+rear*.png
+map*.png

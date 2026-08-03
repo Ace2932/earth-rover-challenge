@@ -72,6 +72,10 @@ class SimConfig:
     battery_start: float = 88.0
     battery_drain_pct_per_min: float = 0.0
     gps_signal: float = 31.0
+    # No GPS lock: the bot reports latitude/longitude 1000 and fix_quality 0 while
+    # /data keeps ticking, so freshness checks stay quiet. Until this existed the
+    # harness always had a lock and #77 could not be reproduced offline at all.
+    no_fix: bool = False
     start_mission_unavailable: bool = False
     seed: int = 0
 
@@ -208,8 +212,20 @@ class Sim:
     # ---------------- telemetry ----------------
 
     def data(self):
+        """`/data` in the SHAPE the real SDK sends, not merely the fields we read.
+
+        Every IMU-ish array is `[...values, sample timestamp]` — see the response
+        documented in earth-rovers-sdk/README.md. This file used to drop those
+        timestamps, which is exactly how #76 survived 267 tests: the follower read
+        the whole `rpms` row, and only the real bot's row had a ~1.7e9 timestamp in
+        it to misread. A harness that is tidier than the thing it stands in for
+        tests the tidiness, not the thing (#78).
+        """
         lat, lon = self._reported()
         linear, angular = self.cmd
+        now = self.clock()
+        if self.cfg.no_fix:
+            lat, lon = 1000, 1000
         return {
             "battery": self.battery(),
             "signal_level": 5,
@@ -217,14 +233,15 @@ class Sim:
             "lamp": 0,
             "speed": linear * self.cfg.max_speed,
             "gps_signal": self.cfg.gps_signal,
+            "fix_quality": 0 if self.cfg.no_fix else 1,
             "latitude": lat,
             "longitude": lon,
             "vibration": 0.1,
-            "timestamp": self.clock(),
-            "accels": [[0.0, 0.0, 9.81]],
-            "gyros": [[0.0, 0.0, angular * self.cfg.max_yaw]],    # deg/s, yaw last
+            "timestamp": now,
+            "accels": [[0.0, 0.0, 9.81, now]],
+            "gyros": [[0.0, 0.0, angular * self.cfg.max_yaw, now]],   # deg/s, yaw at [2]
             "mags": [],
-            "rpms": [[linear * 100] * 4],
+            "rpms": [[linear * 100] * 4 + [now]],                     # four wheels, then ts
         }
 
     # ---------------- mission ----------------

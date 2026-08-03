@@ -19,6 +19,27 @@ import time
 
 from rover_client import RoverClient
 from geo import bearing_deg, haversine_m, wrap180
+from telemetry import position_is_real
+
+
+def usable_samples(samples):
+    """Drop samples whose position is not a real fix (#82).
+
+    The all-sentinel run was already safe by luck — 1000/1000 throughout gives a
+    haversine of 0, which trips the "moved only 0.00 m" guard below. The dangerous
+    case is a lock that arrives or drops partway through the drive: the chord then
+    runs between a real position and nowhere, the distance is enormous so the guard
+    waves it through, and this prints a confident HEADING_OFFSET derived from a
+    bearing to nowhere.
+
+    A wrong calibration is worse than none. It is the seed the heading filter starts
+    from, and the runbook has you exporting it by hand into every run that day.
+
+    Uses the follower's own definition rather than a second copy of it — two places
+    disagreeing about one payload is what #76 and #77 both were.
+    """
+    return [s for s in samples
+            if position_is_real({"latitude": s[0], "longitude": s[1]})]
 
 
 def hard_stop(client, attempts=10, gap_s=0.05):
@@ -61,10 +82,16 @@ def main():
     throttle = float(os.getenv("CAL_THROTTLE", "0.5"))
     print(f"driving straight {secs}s at linear={throttle} — keep the path clear")
 
-    samples = collect(c, secs=secs, throttle=throttle)
+    raw = collect(c, secs=secs, throttle=throttle)
+    samples = usable_samples(raw)
+    dropped = len(raw) - len(samples)
+    if dropped:
+        print(f"dropped {dropped}/{len(raw)} samples with no GPS lock")
 
     if len(samples) < 3:
-        print("too few samples; increase CAL_SECS"); return
+        print("too few samples with a real GPS fix; are you outdoors with a lock? "
+              "(check `curl $SDK_BASE_URL/data` — latitude 1000 means no fix)")
+        return
     la0, lo0, _ = samples[0]
     la1, lo1, _ = samples[-1]
     dist = haversine_m(la0, lo0, la1, lo1)

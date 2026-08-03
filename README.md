@@ -17,6 +17,7 @@ which maps directly onto standard robot nav.
 | `tests/` | `pytest` unit tests for geometry + control law + heading fusion. |
 | `fake_sdk_server.py` | Stdlib fake SDK server — run the REAL HTTP client end-to-end, no bot. |
 | `calibrate_heading.py` | Recover the bot's `orientation`→degrees mapping (run once per bot). |
+| `capture_route.py` | Record a teleop lap into a `--route` file. Read-only: it never drives. |
 | `CALL_DAY_RUNBOOK.md` | Exact live bring-up steps for the onboarding call. |
 | `DEPLOYMENT.md` | Why this belongs on a cloud VM, and how to run it there. |
 | `health.py` | Watches `/data`'s timestamp; restarts the SDK server when Chrome wedges. |
@@ -130,6 +131,31 @@ shapes, and the orientation→heading pipeline — verified against the SDK's ac
    python3 waypoint_follower.py                 # waypoints from /checkpoints-list
    # or:  python3 waypoint_follower.py --route my_route.json
    ```
+
+## On a bot you OWN (no mission) — record a lap, then drive it
+A challenge allocation comes with a `MISSION_SLUG`; a bot you bought does not, and without
+one the SDK's mission API is not just empty but unusable — `/checkpoints-list` returns `{}`
+and `/checkpoint-reached` answers `500`. There are no server checkpoints to follow, so you
+bring your own route:
+
+```bash
+# 1. teleop the bot around the route once, recording as you go (this tool only READS —
+#    it can never send a control command while you are driving)
+SDK_BASE_URL=http://localhost:8001 python3 capture_route.py park_lap.json   # Ctrl-C to end
+
+# 2. drive it autonomously
+python3 waypoint_follower.py --route park_lap.json --watchdog --log run1.csv
+```
+
+With a route file, **arrival is local** — within `LOCAL_ARRIVE_M` (5 m) of our own fix — and
+no checkpoint is ever claimed. That is the only thing that can work without a mission, and it
+is honest about what it proves: the judge of arrival is the same fix we were steering on, so a
+GPS bias moves the finish line with it. A mission run is still server-authoritative and always
+worth more.
+
+**First outdoor run:** set `GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0` to disable the speed governor
+until `gps_signal`'s units are actually measured — the scale is undocumented, and a wrong guess
+crawls the whole run. See `AIDEN_TODO.md`.
 
 ## ⚠️ Calibrate heading before trusting live steering
 The SDK `orientation` field's units aren't documented as degrees. Once: drive straight for

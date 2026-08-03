@@ -50,6 +50,10 @@ class Config:
     # distance, so ask early and often rather than waiting for our own fix to agree.
     checkpoint_radius_m: float = 20.0  # start asking the server "reached?" inside this
     checkpoint_poll_s: float = 1.0     # how often to ask while inside it
+    # --route only: with no mission there is no server to confirm anything, so this
+    # is what "arrived" means. Deliberately tighter than the challenge's 15 m — the
+    # only judge left is our own fix, so it should have to be convincing (#79).
+    local_arrive_m: float = 5.0
     server_dist_max_age_s: float = 3.0 # after this, fall back to our own haversine
     cruise: float = 0.6                # forward throttle when aligned, 0..1
     kp_ang: float = 1.5                # steering gain (full turn near 45deg err)
@@ -129,7 +133,8 @@ class Config:
     # mission, CHECKPOINT_RADIUS_M=0 never claims a checkpoint (#64).
     POSITIVE = ("loop_hz", "command_hz", "stuck_s", "max_runtime_s", "checkpoint_radius_m",
                 "heading_min_move_m", "yaw_rate_dps", "max_speed_mps", "approach_m",
-                "max_consecutive_errors", "stop_attempts", "recovery_tries")
+                "max_consecutive_errors", "stop_attempts", "recovery_tries",
+                "local_arrive_m")
     NON_NEGATIVE = ("checkpoint_poll_s", "server_dist_max_age_s", "deadband_deg",
                     "align_deg", "kp_ang", "max_dang", "setpoint_stale_s",
                     "control_timeout_s", "data_timeout_s", "fix_max_age_s",
@@ -493,6 +498,15 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
         safe_stop(io, cfg)
         return False
     print(f"[follower] {len(wps)} waypoints, starting at {start + 1}")
+    # A route file means the waypoints are ours, so nothing on the server can confirm
+    # them and nothing should be asked to. Say so once, loudly: this is the run whose
+    # "COMPLETE" is worth strictly less than a mission's, because the only judge of
+    # arrival was the same fix we were steering on (#79).
+    local_arrival = route_file is not None
+    if local_arrival:
+        print(f"[follower] route file — arrival is LOCAL (within "
+              f"{cfg.local_arrive_m:.0f} m of our own fix). No checkpoint is claimed, "
+              f"and a GPS bias moves the finish line with it.")
     is_mock = isinstance(io, MockIO)
     period = 1.0 / cfg.loop_hz
     i, step = start, 0
@@ -541,14 +555,19 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 print(f"[follower] ABORT: {verdict.abort}")
                 aborted = True
                 break
-            if verdict.stale_fix:
-                # The position we would steer on is no longer real. Treat it exactly
-                # like a failed telemetry read: skip the step, let the setpoint decay
-                # to a stop, and give up deliberately if it never recovers. Driving on
-                # a frozen fix ends in a recovery ladder planned against fiction (#59).
+            if verdict.stale_fix or verdict.no_fix:
+                # The position we would steer on is not real — either it stopped
+                # updating (#59) or there is no GPS lock behind it at all (#77).
+                # Both mean the same thing to the controller, so both get the same
+                # treatment as a failed telemetry read: skip the step, let the
+                # setpoint decay to a stop, and give up deliberately if it never
+                # recovers. Driving on either ends in a recovery ladder planned
+                # against fiction.
                 errors += 1
                 if errors >= cfg.max_consecutive_errors:
-                    print("[follower] position fix has not updated — stopping")
+                    print("[follower] no usable position fix "
+                          f"({'no GPS lock' if verdict.no_fix else 'not updating'})"
+                          " — stopping")
                     break
                 if not is_mock:
                     deadline = max(deadline + period, time.monotonic() - period)
@@ -593,10 +612,20 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             # distance it measured. Rate-limited so we do not spam the API (unthrottled
             # in the mock, whose loop has no sleep). Never asked while on a detour —
             # the detour point is not a checkpoint, and claiming it would be a lie.
+            #
+            # On a route file there is no server to ask: these waypoints are ours, the
+            # bot may have no mission at all, and claiming a checkpoint the server did
+            # not set would be a lie even on the runs where the call happens to succeed
+            # (#79). So arrival is decided against our own fix, and `reached()` is never
+            # called — which is also the only thing that works on a bot you own, where
+            # /checkpoint-reached 500s for want of a mission slug.
             if not detour and dist < cfg.checkpoint_radius_m and (
-                    is_mock or now - last_reach_try > cfg.checkpoint_poll_s):
+                    local_arrival or is_mock or now - last_reach_try > cfg.checkpoint_poll_s):
                 last_reach_try = now
-                ok, detail = io.reached()
+                if local_arrival:
+                    ok, detail = dist <= cfg.local_arrive_m, {}
+                else:
+                    ok, detail = io.reached()
                 if ok:
                     # Retried and swallowed: a dropped stop command must not cost us a
                     # checkpoint the server has already confirmed (#48). The next

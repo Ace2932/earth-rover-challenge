@@ -17,6 +17,7 @@ class Verdict:
     abort: str = None               # non-None -> stop the run, with this reason
     no_motion: bool = False         # commanded to move, wheels say otherwise
     stale_fix: bool = False         # /data stopped updating; the position is fiction
+    no_fix: bool = False            # /data is live but has no GPS lock; same result
     warnings: list = field(default_factory=list)
 
 
@@ -28,14 +29,62 @@ def _num(data, key):
         return None
 
 
+def no_fix_reason(data):
+    """Why this payload's position cannot be steered on, or None if it can.
+
+    With no GPS lock the bot reports latitude and longitude of 1000 and
+    `fix_quality` 0 — observed on the bench 2026-07-30 — while /data keeps ticking.
+    So a freshness check stays perfectly quiet, and every bearing computed from that
+    position is fiction: measured at a 13 267 km "distance" driven at full cruise
+    for a whole STUCK_S (#77).
+
+    `fix_quality` is not in the SDK's documented response, so its ABSENCE must never
+    condemn a healthy bot; only an explicit 0 does. Likewise only coordinates that
+    are PRESENT and impossible condemn a payload — a missing latitude cannot reach
+    here from a real bot, because `LiveIO.get_pose` reads it first and a KeyError
+    there is already handled as a failed telemetry read. Treating absence as "no
+    fix" would fire on test doubles alone, which is how the first version of this
+    broke a healthy recovery test while protecting nothing.
+
+    This is the single definition of "is this a real position", shared with
+    `capture_route.py`. A second copy is a second thing to get wrong, and two places
+    disagreeing about one payload is what #76 and #77 both were.
+    """
+    if _num(data, "fix_quality") == 0:
+        return "GPS reports no fix (fix_quality 0)"
+    lat, lon = _num(data, "latitude"), _num(data, "longitude")
+    if (lat is not None and abs(lat) > 90.0) or (lon is not None and abs(lon) > 180.0):
+        return f"position {lat}, {lon} is not on Earth"
+    return None
+
+
+def position_is_real(data):
+    """True if `data`'s position is something a controller may steer on."""
+    return no_fix_reason(data) is None
+
+
+WHEELS = 4      # the Mini+ has four; anything after them in the row is not a wheel
+
+
 def _wheel_motion(data):
-    """Any evidence of movement: reported speed, or a turning wheel."""
+    """Any evidence of movement: reported speed, or a turning wheel.
+
+    `/data`'s `rpms` rows are `[w1, w2, w3, w4, timestamp]` — the same
+    values-then-timestamp shape `accels`, `gyros` and `mags` all use. Reading the
+    whole row made every sample look like a wheel spinning at ~1.7e9 RPM, so this
+    could not return False on a real bot and the no-motion check was dead (#76).
+
+    Take the first four rather than dropping the last: a producer that omits the
+    timestamp would otherwise silently lose a wheel, which is the same class of
+    mistake in the other direction.
+    """
     speed = _num(data, "speed")
     if speed is not None and abs(speed) > 0.05:
         return True
     try:
         return any(abs(float(r)) > 1.0 for sample in data.get("rpms") or []
-                   for r in (sample if isinstance(sample, (list, tuple)) else [sample]))
+                   for r in (sample[:WHEELS] if isinstance(sample, (list, tuple))
+                             else [sample]))
     except (TypeError, ValueError):
         return False
 
@@ -85,6 +134,13 @@ class Guard:
                 span = c.gps_signal_good - c.gps_signal_poor
                 frac = (gps - c.gps_signal_poor) / span
                 v.speed_scale = c.min_speed_scale + frac * (1.0 - c.min_speed_scale)
+
+        # Is there a fix at all? Distinct from the freshness check below, which a
+        # live link with no GPS lock sails straight through (#77).
+        reason = no_fix_reason(data)
+        if reason:
+            v.no_fix = True
+            self._once("nofix", reason, v)
 
         # Is the position fix still alive? The SDK serves /data from a value cached
         # in the browser page and updated by incoming RTM messages, so a stalled link
