@@ -9,6 +9,8 @@ the telemetry guards), plus combinations that work today and should stay working
 """
 import math
 
+import pytest
+
 from geo import wrap180
 from heading import HeadingEstimator
 from telemetry import Guard
@@ -135,3 +137,52 @@ def test_recovery_still_runs_when_everything_is_healthy():
     io.get_pose = advancing_pose
     run(io, cfg(stuck_s=0.3, max_runtime_s=4.0, recovery_tries=2, loop_hz=20.0))
     assert any(c[0] < 0 for c in io.commands), "the ladder never backed up"
+
+
+# ---------------- config values that are fatal only in combination (#74) ----------------
+
+def test_a_loop_slower_than_the_setpoint_staleness_is_refused(monkeypatch):
+    """The commander decays a setpoint nobody refreshed. If the loop period exceeds
+    that window the setpoint expires between every iteration: measured at LOOP_HZ=1
+    with the default 0.5 s staleness, 52% of streamed commands were zero throttle."""
+    monkeypatch.setenv("LOOP_HZ", "1")
+    with pytest.raises(ValueError) as e:
+        Config.from_env()
+    msg = str(e.value)
+    assert "LOOP_HZ" in msg and "SETPOINT_STALE_S" in msg, (
+        f"the message must name both, since neither is wrong alone: {msg}")
+
+
+def test_raising_the_staleness_makes_a_slow_loop_legal(monkeypatch):
+    """The constraint is a relationship, not a ban on slow loops."""
+    monkeypatch.setenv("LOOP_HZ", "1")
+    monkeypatch.setenv("SETPOINT_STALE_S", "3")
+    Config.from_env()
+
+
+def test_the_defaults_satisfy_the_relationship():
+    Config.from_env()
+
+
+def test_a_fast_loop_is_unaffected(monkeypatch):
+    monkeypatch.setenv("LOOP_HZ", "20")
+    Config.from_env()
+
+
+def test_the_watchdog_timeout_follows_the_command_rate():
+    """The heartbeat interval is 1/COMMAND_HZ. A timeout shorter than that stops a
+    perfectly healthy rover — measured at COMMAND_HZ=0.5, 14 stops in 6 s."""
+    from waypoint_follower import watchdog_timeout_s
+
+    assert watchdog_timeout_s(cfg(command_hz=20.0)) == pytest.approx(1.0)
+    slow = watchdog_timeout_s(cfg(command_hz=0.5))
+    assert slow > 2.0, "must exceed the 2 s heartbeat interval"
+    assert slow <= 12.0, "but must still detect a dead follower in reasonable time"
+
+
+def test_the_watchdog_timeout_never_drops_below_the_default():
+    """A very fast streamer must not shrink the window so far that ordinary jitter
+    reads as death."""
+    from waypoint_follower import watchdog_timeout_s
+
+    assert watchdog_timeout_s(cfg(command_hz=200.0)) >= 1.0
