@@ -19,7 +19,7 @@ import time
 
 from rover_client import RoverClient
 from geo import bearing_deg, haversine_m, wrap180
-from telemetry import position_is_real
+from telemetry import ignore_fix_quality_from_env, position_is_real
 
 
 def usable_samples(samples):
@@ -38,8 +38,10 @@ def usable_samples(samples):
     Uses the follower's own definition rather than a second copy of it — two places
     disagreeing about one payload is what #76 and #77 both were.
     """
+    ignore_fq = ignore_fix_quality_from_env()
     return [s for s in samples
-            if position_is_real({"latitude": s[0], "longitude": s[1]})]
+            if position_is_real({"latitude": s[0], "longitude": s[1]},
+                                ignore_fix_quality=ignore_fq)]
 
 
 def hard_stop(client, attempts=10, gap_s=0.05):

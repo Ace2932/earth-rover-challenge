@@ -24,6 +24,12 @@ GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0 CRUISE=0.3 \
 Turn the GPS speed governor **off** for run 1 (`GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0`) until
 question 2 below is actually measured. Full sequence in `CALL_DAY_RUNBOOK.md`.
 
+**If it refuses to drive outdoors with a lock you can see**, the culprit is almost certainly
+`fix_quality` — undocumented, observed once indoors next to the 1000/1000 sentinel, never on
+a bot with a real lock. `IGNORE_FIX_QUALITY=1` overrides it; the coordinate sanity check is
+unaffected. Then **record what `fix_quality` reads outdoors with a lock** — that is a fourth
+cheap measurement and it retires the guess (#86).
+
 Two real defects came out of auditing the harness against the SDK's documented payload, and
 neither was reachable from the simulator — see "What the harness still cannot tell you":
 

@@ -28,11 +28,45 @@ import time
 
 from geo import haversine_m
 from rover_client import RoverClient
-from telemetry import position_is_real
+from telemetry import ignore_fix_quality_from_env, position_is_real
 
 # Re-exported, not reimplemented: one definition of "is this a real position",
 # shared with the follower's telemetry guard (#77).
 usable_fix = position_is_real
+
+# The shipped defaults, as constants rather than string literals buried in
+# main(), so a test can assert the pair actually holds instead of asserting a
+# relationship between one real default and one invented number (#87).
+#
+# Spacing sits above HEADING_MIN_MOVE_M (8 m) as well as above LOCAL_ARRIVE_M:
+# waypoints closer than the heading filter's odometry baseline mean it never
+# gets a GPS course correction between two of them, so the leg runs on dead
+# reckoning.
+DEFAULT_SPACING_M = 10.0
+DEFAULT_HZ = 2.0
+
+
+def _env_float(name, default):
+    """`NAME=` with nothing after it is the ordinary shape of a .env line, and it
+    reaches python as '' — for which os.getenv's two-arg default does NOT fire and
+    float('') raises. Same trap as #84's SDK_PORT."""
+    return float(os.getenv(name) or default)
+
+
+def default_spacing_m():
+    return _env_float("CAPTURE_SPACING_M", DEFAULT_SPACING_M)
+
+
+def default_hz():
+    return _env_float("CAPTURE_HZ", DEFAULT_HZ)
+
+
+def default_arrive_m():
+    """The FOLLOWER's arrival radius, read from its Config rather than retyped here.
+    A second literal would warn about the wrong pair the moment the follower's
+    default moved (#87)."""
+    from waypoint_follower import Config
+    return _env_float("LOCAL_ARRIVE_M", Config().local_arrive_m)
 
 
 def decimate(points, spacing_m):
@@ -81,6 +115,13 @@ def capture(client, out_path, hz, spacing_m, arrive_m, log=print):
     if warn:
         log(f"[capture] WARNING: {warn}")
 
+    # Same override the follower reads, so capture cannot drop fixes the
+    # follower would accept — two places disagreeing about one payload is the
+    # failure this shared rule exists to avoid (#86).
+    ignore_fq = ignore_fix_quality_from_env()
+    if ignore_fq:
+        log('[capture] IGNORE_FIX_QUALITY set — keeping fixes that report '
+            'fix_quality 0 (coordinate sanity still applies)')
     track, skipped, last_report = [], 0, 0.0
     log(f"[capture] recording at {hz:g} Hz — drive the bot now, Ctrl-C when done")
     try:
@@ -91,7 +132,7 @@ def capture(client, out_path, hz, spacing_m, arrive_m, log=print):
                 log(f"[capture] telemetry failed, retrying: {e}")
                 time.sleep(1.0 / hz)
                 continue
-            if not usable_fix(d):
+            if not usable_fix(d, ignore_fix_quality=ignore_fq):
                 skipped += 1
             else:
                 track.append((float(d["latitude"]), float(d["longitude"])))
@@ -133,13 +174,8 @@ def main(argv=None):
         return 2
     out = argv[0]
     client = RoverClient(base_url=os.getenv("SDK_BASE_URL", "http://localhost:8000"))
-    # Default spacing sits above HEADING_MIN_MOVE_M (8 m): waypoints closer than the
-    # heading filter's odometry baseline mean it never gets a GPS course correction
-    # between them, so the whole leg runs on dead reckoning.
-    capture(client, out,
-            hz=float(os.getenv("CAPTURE_HZ", "2")),
-            spacing_m=float(os.getenv("CAPTURE_SPACING_M", "10")),
-            arrive_m=float(os.getenv("LOCAL_ARRIVE_M", "5")))
+    capture(client, out, hz=default_hz(), spacing_m=default_spacing_m(),
+            arrive_m=default_arrive_m())
     return 0
 
 
