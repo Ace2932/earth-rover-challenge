@@ -29,6 +29,40 @@ def _num(data, key):
         return None
 
 
+def no_fix_reason(data):
+    """Why this payload's position cannot be steered on, or None if it can.
+
+    With no GPS lock the bot reports latitude and longitude of 1000 and
+    `fix_quality` 0 — observed on the bench 2026-07-30 — while /data keeps ticking.
+    So a freshness check stays perfectly quiet, and every bearing computed from that
+    position is fiction: measured at a 13 267 km "distance" driven at full cruise
+    for a whole STUCK_S (#77).
+
+    `fix_quality` is not in the SDK's documented response, so its ABSENCE must never
+    condemn a healthy bot; only an explicit 0 does. Likewise only coordinates that
+    are PRESENT and impossible condemn a payload — a missing latitude cannot reach
+    here from a real bot, because `LiveIO.get_pose` reads it first and a KeyError
+    there is already handled as a failed telemetry read. Treating absence as "no
+    fix" would fire on test doubles alone, which is how the first version of this
+    broke a healthy recovery test while protecting nothing.
+
+    This is the single definition of "is this a real position", shared with
+    `capture_route.py`. A second copy is a second thing to get wrong, and two places
+    disagreeing about one payload is what #76 and #77 both were.
+    """
+    if _num(data, "fix_quality") == 0:
+        return "GPS reports no fix (fix_quality 0)"
+    lat, lon = _num(data, "latitude"), _num(data, "longitude")
+    if (lat is not None and abs(lat) > 90.0) or (lon is not None and abs(lon) > 180.0):
+        return f"position {lat}, {lon} is not on Earth"
+    return None
+
+
+def position_is_real(data):
+    """True if `data`'s position is something a controller may steer on."""
+    return no_fix_reason(data) is None
+
+
 WHEELS = 4      # the Mini+ has four; anything after them in the row is not a wheel
 
 
@@ -101,29 +135,12 @@ class Guard:
                 frac = (gps - c.gps_signal_poor) / span
                 v.speed_scale = c.min_speed_scale + frac * (1.0 - c.min_speed_scale)
 
-        # Is there a fix at all? With no GPS lock the bot reports latitude and
-        # longitude of 1000 and `fix_quality` 0 — observed on the bench 2026-07-30 —
-        # while /data keeps ticking. So the freshness check below stays perfectly
-        # quiet, and every bearing computed from that position is fiction: measured
-        # at a 13 267 km "distance" driven at full cruise for a whole STUCK_S (#77).
-        #
-        # `fix_quality` is not in the SDK's documented response, so its ABSENCE must
-        # never condemn a healthy bot; only an explicit 0 does. The coordinate range
-        # check needs no undocumented field and catches the sentinel on its own.
-        if _num(data, "fix_quality") == 0:
+        # Is there a fix at all? Distinct from the freshness check below, which a
+        # live link with no GPS lock sails straight through (#77).
+        reason = no_fix_reason(data)
+        if reason:
             v.no_fix = True
-            self._once("nofix", "GPS reports no fix (fix_quality 0)", v)
-        #
-        # Only values that are PRESENT and impossible condemn the payload. A missing
-        # latitude cannot reach here from a real bot — `LiveIO.get_pose` reads it
-        # before the guard runs and a KeyError there is already handled as a failed
-        # telemetry read — so treating absence as "no fix" would only ever fire on
-        # test doubles, which is how the first version of this broke a healthy
-        # recovery test while protecting nothing.
-        lat, lon = _num(data, "latitude"), _num(data, "longitude")
-        if (lat is not None and abs(lat) > 90.0) or (lon is not None and abs(lon) > 180.0):
-            v.no_fix = True
-            self._once("nofix_range", f"position {lat}, {lon} is not on Earth", v)
+            self._once("nofix", reason, v)
 
         # Is the position fix still alive? The SDK serves /data from a value cached
         # in the browser page and updated by incoming RTM messages, so a stalled link
