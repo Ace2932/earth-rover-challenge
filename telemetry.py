@@ -8,7 +8,10 @@ wheel motion at all.
 
 `Guard` is pure: telemetry in, a verdict out. No I/O, no clock of its own.
 """
+import os
 from dataclasses import dataclass, field
+
+from envcfg import FALSEY
 
 
 @dataclass
@@ -29,7 +32,18 @@ def _num(data, key):
         return None
 
 
-def no_fix_reason(data):
+def ignore_fix_quality_from_env():
+    """IGNORE_FIX_QUALITY, for the tools that have no Config (#86).
+
+    Named IGNORE_* rather than TRUST_* deliberately. `.env` placeholders in this repo
+    are written `KEY=`, and `envcfg.FALSEY` treats an empty string as false — so with
+    a TRUST_* flag, blanking the line would silently REMOVE the protection. Blanking
+    this one leaves the guard on.
+    """
+    return (os.getenv("IGNORE_FIX_QUALITY") or "").strip().lower() not in FALSEY
+
+
+def no_fix_reason(data, ignore_fix_quality=False):
     """Why this payload's position cannot be steered on, or None if it can.
 
     With no GPS lock the bot reports latitude and longitude of 1000 and
@@ -46,11 +60,25 @@ def no_fix_reason(data):
     fix" would fire on test doubles alone, which is how the first version of this
     broke a healthy recovery test while protecting nothing.
 
+    The two halves are NOT equally certain, and only one of them is overridable:
+
+    - The coordinate range check CANNOT be wrong. No real position has |lat| > 90.
+      It catches the 1000/1000 sentinel on its own, needs no undocumented field, and
+      stays unconditional.
+    - `fix_quality` is the ASSUMPTION. It is undocumented and has been seen exactly
+      once — indoors, alongside the sentinel, so the two were perfectly correlated
+      and the sentinel alone explains what was observed. It has never been seen on a
+      bot with a real lock. If "NMEA 0 = invalid" does not hold for this bot, the
+      rover cannot be driven at all, in the field, with only a log line to go on.
+      `IGNORE_FIX_QUALITY` is the same escape hatch `gps_signal` already ships for
+      being equally undocumented (#86).
+
     This is the single definition of "is this a real position", shared with
-    `capture_route.py`. A second copy is a second thing to get wrong, and two places
-    disagreeing about one payload is what #76 and #77 both were.
+    `capture_route.py` and `calibrate_heading.py`. A second copy is a second thing to
+    get wrong, and two places disagreeing about one payload is what #76 and #77 both
+    were.
     """
-    if _num(data, "fix_quality") == 0:
+    if not ignore_fix_quality and _num(data, "fix_quality") == 0:
         return "GPS reports no fix (fix_quality 0)"
     lat, lon = _num(data, "latitude"), _num(data, "longitude")
     if (lat is not None and abs(lat) > 90.0) or (lon is not None and abs(lon) > 180.0):
@@ -58,9 +86,9 @@ def no_fix_reason(data):
     return None
 
 
-def position_is_real(data):
+def position_is_real(data, ignore_fix_quality=False):
     """True if `data`'s position is something a controller may steer on."""
-    return no_fix_reason(data) is None
+    return no_fix_reason(data, ignore_fix_quality) is None
 
 
 WHEELS = 4      # the Mini+ has four; anything after them in the row is not a wheel
@@ -137,7 +165,8 @@ class Guard:
 
         # Is there a fix at all? Distinct from the freshness check below, which a
         # live link with no GPS lock sails straight through (#77).
-        reason = no_fix_reason(data)
+        reason = no_fix_reason(
+            data, getattr(c, "ignore_fix_quality", False))
         if reason:
             v.no_fix = True
             self._once("nofix", reason, v)

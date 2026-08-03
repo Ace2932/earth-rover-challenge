@@ -72,10 +72,45 @@ def test_spacing_comfortably_above_the_arrival_radius_is_fine():
 
 
 def test_the_shipped_defaults_are_a_working_pair():
-    """CAPTURE_SPACING_M's default against LOCAL_ARRIVE_M's. If either default moves,
-    this is the test that notices."""
+    """CAPTURE_SPACING_M's default against LOCAL_ARRIVE_M's, both READ rather than
+    retyped. The previous version hardcoded 10.0 and so asserted a relationship
+    between one real default and one invented number — it would have passed while
+    the shipped pair was broken, which is the exact claim its docstring denied (#87).
+    """
+    from capture_route import DEFAULT_SPACING_M
     from waypoint_follower import Config
-    assert spacing_warning(10.0, Config().local_arrive_m) is None
+    assert spacing_warning(DEFAULT_SPACING_M, Config().local_arrive_m) is None
+
+
+def test_the_arrival_radius_default_is_the_followers_not_a_second_literal():
+    """capture must not carry its own idea of LOCAL_ARRIVE_M: it would warn about the
+    wrong pair the moment the follower's default moved."""
+    import inspect
+
+    import capture_route
+    from waypoint_follower import Config
+    src = inspect.getsource(capture_route.main)
+    assert '"5"' not in src and "'5'" not in src, (
+        "capture_route hardcodes the arrival radius instead of reading Config")
+    assert capture_route.default_arrive_m() == Config().local_arrive_m
+
+
+def test_a_blank_local_arrive_m_does_not_crash_capture(monkeypatch):
+    """`LOCAL_ARRIVE_M=` is the ordinary shape of a .env line. float('') raises, and
+    os.getenv's two-arg default does not fire for a set-but-empty name — the same
+    trap as #84's SDK_PORT."""
+    import capture_route
+    from waypoint_follower import Config
+    monkeypatch.setenv("LOCAL_ARRIVE_M", "")
+    assert capture_route.default_arrive_m() == Config().local_arrive_m
+
+
+def test_blank_capture_knobs_fall_back_to_the_shipped_defaults(monkeypatch):
+    import capture_route
+    monkeypatch.setenv("CAPTURE_SPACING_M", "")
+    monkeypatch.setenv("CAPTURE_HZ", "")
+    assert capture_route.default_spacing_m() == capture_route.DEFAULT_SPACING_M
+    assert capture_route.default_hz() == capture_route.DEFAULT_HZ
 
 
 # ---------------- the fixes that must not enter a route ----------------

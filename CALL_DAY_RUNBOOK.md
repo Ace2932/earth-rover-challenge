@@ -61,6 +61,33 @@ GPS_SIGNAL_GOOD=0 GPS_SIGNAL_POOR=0 CRUISE=0.3 \
 units of `gps_signal` are still unmeasured, and the bench read **16 with zero GPS fix**, so
 the shipped thresholds are a guess that could crawl the whole run.
 
+### If it refuses to drive outdoors with a lock you can see
+
+```
+[follower] WARNING: GPS reports no fix (fix_quality 0)
+[follower] no usable position fix (no GPS lock) — stopping
+```
+
+`fix_quality` is **undocumented** and has been observed exactly once — indoors, alongside the
+lat/lon 1000 sentinel, so the two were perfectly correlated and the sentinel alone explains
+what was seen. It has **never** been observed on a bot with a real lock. "0 = invalid" is the
+NMEA reading, not a measurement of this bot.
+
+If the coordinates look sane and only this fires, the assumption is wrong for the Mini+:
+
+```bash
+IGNORE_FIX_QUALITY=1 ... python waypoint_follower.py --route park_lap.json --watchdog
+```
+
+Then **write down what `fix_quality` actually reads outdoors with a lock** — that turns a
+guess into a measurement and the flag can go away. The coordinate check (`|lat| > 90`) is not
+affected by the flag and cannot be switched off; it needs no undocumented field.
+
+### It gives up after ~4 s without a lock
+`MAX_CONSECUTIVE_ERRORS` (20) at `LOOP_HZ` 5 is about four seconds. A lock that comes back
+resets the counter, so bridges and awnings are survivable — but a long urban canyon is not.
+Raise it if a run dies somewhere you expected to lose signal.
+
 Arrival on a route file is **local** — within `LOCAL_ARRIVE_M` (5 m) of our own fix, and no
 checkpoint is claimed. It is the only thing that works without a mission, and it proves less
 than a mission run does: the judge of arrival is the same fix you are steering on.

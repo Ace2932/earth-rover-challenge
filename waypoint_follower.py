@@ -80,6 +80,12 @@ class Config:
     min_speed_scale: float = 0.3       # slowest we will crawl on a bad fix
     no_motion_s: float = 4.0           # commanded to move this long with no wheel motion
     fix_max_age_s: float = 3.0         # /data timestamp frozen this long -> do not drive on it
+    # `fix_quality` is undocumented and was seen once, indoors, alongside the
+    # 1000/1000 sentinel. If 'NMEA 0 = invalid' does not hold for this bot the
+    # rover cannot be driven at all, so the assumption gets an escape hatch — the
+    # same one `gps_signal` already has. The coordinate-range half of the check
+    # cannot be wrong and is NOT affected by this (#86).
+    ignore_fix_quality: bool = False
 
     # --- vision fusion (only used with --vision) ---
     vision_alpha: float = 0.5          # weight on VISION steering (0 = pure GPS)

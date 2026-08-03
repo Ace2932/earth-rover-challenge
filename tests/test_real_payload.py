@@ -121,6 +121,71 @@ def test_a_payload_without_coordinates_at_all_is_not_condemned():
     assert Guard(cfg()).check(d, cmd_linear=0.6, now=1000.0).no_fix is False
 
 
+# ---------------- #86: the assumption under the fix_quality half ----------------
+
+def test_the_fix_quality_check_can_be_turned_off():
+    """`fix_quality` is not in the SDK's documented response and has been seen once,
+    indoors, alongside the 1000/1000 sentinel — so 'higher-level NMEA 0 = invalid' is
+    an assumption, not a measurement. If it is wrong the rover cannot be driven at
+    all, in the field, with only a log line. `gps_signal` is equally undocumented and
+    already ships a disable; this is the same treatment."""
+    v = Guard(cfg(ignore_fix_quality=True)).check(
+        real_data(fix_quality=0), cmd_linear=0.6, now=1000.0)
+    assert v.no_fix is False
+
+
+def test_the_override_is_off_by_default():
+    from waypoint_follower import Config
+    assert Config().ignore_fix_quality is False
+
+
+def test_the_coordinate_check_cannot_be_turned_off():
+    """The half that CANNOT be wrong stays unconditional: no real position has
+    |latitude| > 90, so this needs no undocumented field and has no failure mode
+    that an override would rescue. Turning off the assumption must not turn off the
+    fact."""
+    v = Guard(cfg(ignore_fix_quality=True)).check(
+        real_data(latitude=1000, longitude=1000, fix_quality=0),
+        cmd_linear=0.6, now=1000.0)
+    assert v.no_fix is True
+
+
+def test_a_blank_override_leaves_the_guard_on():
+    """`.env` placeholders in this repo are written `KEY=`, and envcfg.FALSEY treats
+    an empty string as false. The flag is named IGNORE_* rather than TRUST_* so that
+    blanking it fails SAFE — a blanked TRUST_FIX_QUALITY would have silently removed
+    the protection."""
+    import os as _os
+    from waypoint_follower import Config
+    saved = _os.environ.get("IGNORE_FIX_QUALITY")
+    _os.environ["IGNORE_FIX_QUALITY"] = ""
+    try:
+        assert Config.from_env().ignore_fix_quality is False
+    finally:
+        _os.environ.pop("IGNORE_FIX_QUALITY", None)
+        if saved is not None:
+            _os.environ["IGNORE_FIX_QUALITY"] = saved
+
+
+def test_the_tools_outside_config_can_read_the_same_override():
+    """capture_route and calibrate_heading have no Config. If they cannot see the
+    override they would drop fixes the follower accepts, which is the two-places-
+    disagreeing failure this rule exists to avoid."""
+    import os as _os
+
+    import telemetry
+    saved = _os.environ.get("IGNORE_FIX_QUALITY")
+    try:
+        _os.environ["IGNORE_FIX_QUALITY"] = "1"
+        assert telemetry.ignore_fix_quality_from_env() is True
+        _os.environ.pop("IGNORE_FIX_QUALITY")
+        assert telemetry.ignore_fix_quality_from_env() is False
+    finally:
+        _os.environ.pop("IGNORE_FIX_QUALITY", None)
+        if saved is not None:
+            _os.environ["IGNORE_FIX_QUALITY"] = saved
+
+
 def test_a_good_fix_is_not_condemned():
     v = Guard(cfg()).check(real_data(fix_quality=1), cmd_linear=0.6, now=1000.0)
     assert v.no_fix is False
@@ -180,6 +245,70 @@ def test_the_loop_never_drives_on_the_no_fix_sentinel():
 def test_the_loop_stops_the_rover_when_the_fix_never_arrives():
     io = NoFixIO()
     run(io, cfg(max_runtime_s=3.0))
+    assert io.commands[-1] == (0, 0)
+
+
+class BlinkingFixIO(NoFixIO):
+    """A lock that drops and comes back — a bridge, an awning, a canyon.
+
+    The rover keeps moving toward the waypoint the whole time; only the reporting
+    stops. That is the realistic case, and the one where refusing permanently would
+    be the wrong answer.
+
+    `blind` is a predicate over the step number rather than a count, so a test can
+    make the TOTAL blind time exceed the error budget while no single outage does.
+    That distinction is the whole point: with a count, a budget of 20 and 5 blind
+    steps the run survives whether or not the counter resets, and the test proves
+    nothing.
+    """
+
+    def __init__(self, blind):
+        super().__init__()
+        self.blind = blind if callable(blind) else (lambda t, n=blind: t <= n)
+        self.north_m = 0.0
+
+    def waypoints(self, route_file):
+        # Close enough to actually reach once the lock returns, so "did not abort"
+        # and "completed" are the same assertion rather than two different ones.
+        return [(37.8719 + 30.0 / M_PER_DEG, -122.2585)], 0
+
+    def reached(self):
+        # A server that confirms, so completion measures whether the follower kept
+        # driving — not whether a stub happened to refuse the checkpoint.
+        return True, {}
+
+    def get_pose(self):
+        self.ticks += 1
+        blind = self.blind(self.ticks)
+        lat = 1000.0 if blind else 37.8719 + self.north_m / M_PER_DEG
+        lon = 1000.0 if blind else -122.2585
+        self.last_data = real_data(latitude=lat, longitude=lon,
+                                   fix_quality=0 if blind else 1,
+                                   timestamp=1724189733.0 + self.ticks * 0.05)
+        return lat, lon, 0.0
+
+    def control(self, linear, angular):
+        self.commands.append((linear, angular))
+        self.north_m += max(0.0, linear) * 2.0
+
+
+def test_repeated_short_losses_of_lock_do_not_end_the_run():
+    """The error budget is CONSECUTIVE failures, so a lock that comes back resets it.
+    Getting this wrong aborts a 50-mile Marathon under the first bridge.
+
+    Two outages of 5 against a budget of 8: 10 blind steps in TOTAL, more than the
+    budget, but never more than 5 in a row. It can only pass if the counter resets —
+    the first version used one 5-step outage against a budget of 20 and passed even
+    with the reset deleted."""
+    io = BlinkingFixIO(lambda t: 1 <= t <= 5 or 12 <= t <= 16)
+    assert run(io, cfg(max_consecutive_errors=8, max_runtime_s=4.0)) is True
+
+
+def test_a_loss_of_lock_longer_than_the_error_budget_does_end_the_run():
+    """The budget is real, not decorative. At the shipped 20 errors and LOOP_HZ=5
+    that is about four seconds of no lock — worth knowing before an urban canyon."""
+    io = BlinkingFixIO(lambda t: True)
+    assert run(io, cfg(max_consecutive_errors=6, max_runtime_s=4.0)) is False
     assert io.commands[-1] == (0, 0)
 
 
