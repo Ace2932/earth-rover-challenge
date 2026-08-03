@@ -43,13 +43,31 @@ You SSH in; nothing depends on your local machine staying awake.
 
 ```bash
 # on the VM
-git clone https://github.com/frodobots-org/earth-rovers-sdk
 git clone https://github.com/Ace2932/earth-rover-challenge
 cd earth-rover-challenge
+deploy/setup_sdk.sh       # clones the SDK and makes it actually runnable — see below
 cp .env.example .env      # fill in SDK_API_TOKEN, BOT_SLUG, MISSION_SLUG
 docker compose up -d
 docker compose logs -f follower
 ```
+
+### The SDK does not run as cloned
+
+`deploy/setup_sdk.sh` exists because three fixes are needed before the upstream SDK
+starts, all of them found during live bring-up and none of them obvious from the
+failure:
+
+1. **Python 3.12.** `requirements.txt` pins `aiohttp==3.9.3` and `numpy==1.26.4`, which
+   have no wheels for 3.13+ and die compiling.
+2. **`google-genai` excluded.** It pulls a `websockets` version that conflicts with
+   pyppeteer, and it is only used by the optional TTS path.
+3. **`browser_service.py` hardcodes `127.0.0.1:8000/sdk`.** Setting `SDK_PORT` moves the
+   API but *not* the page it drives, so every request 200s and no telemetry ever
+   arrives. The worst of the three: it looks like a bot problem, not a setup problem.
+
+The script is idempotent and **verifies each fix after applying it** rather than
+assuming the patch landed — a patch that silently no-ops against a changed upstream is
+otherwise something you find out on a sidewalk.
 
 `docker-compose.yml` here builds the follower and the health watcher and expects the SDK
 server reachable at `SDK_BASE_URL`. The SDK ships its own `Dockerfile` and

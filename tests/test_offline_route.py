@@ -90,6 +90,42 @@ def test_mission_mode_still_needs_the_server_to_confirm():
     assert io.polls > 0
 
 
+# ---------------- CHECKPOINT_RADIUS_M must not cap it (#83) ----------------
+
+class AcceptingIO(ParkedIO):
+    """A rover whose server confirms any checkpoint it is asked about."""
+
+    def reached(self):
+        self.polls += 1
+        return True, {}
+
+
+def test_an_arrival_radius_wider_than_the_checkpoint_radius_is_honoured():
+    """CHECKPOINT_RADIUS_M means 'start asking the SERVER'. There is no server in
+    route mode, so gating on it silently capped arrival at 20 m — while the run
+    announced the larger number the operator had set. Measured: announced 30 m,
+    arrived at 19.8 m."""
+    io = ParkedIO(25.0)
+    assert run(io, cfg(local_arrive_m=30.0, checkpoint_radius_m=20.0),
+               route_file=ROUTE) is True
+
+
+def test_the_announced_arrival_radius_is_the_one_that_is_used():
+    """Whatever the number ends up being, the banner an operator reads to confirm
+    their config took effect must not state one thing and do another."""
+    io = ParkedIO(25.0)
+    assert run(io, cfg(local_arrive_m=20.0, checkpoint_radius_m=20.0),
+               route_file=ROUTE) is False, "arrived from outside the announced radius"
+
+
+def test_mission_mode_still_only_asks_the_server_inside_the_checkpoint_radius():
+    """The regression guard: CHECKPOINT_RADIUS_M keeps its meaning where it has one.
+    A rover 25 m out must not spend API calls on a checkpoint 5 m beyond the band."""
+    io = AcceptingIO(25.0)
+    assert run(io, cfg(local_arrive_m=30.0, checkpoint_radius_m=20.0)) is False
+    assert io.polls == 0, "asked the server from outside CHECKPOINT_RADIUS_M"
+
+
 class WalkingIO(ParkedIO):
     """A rover that closes on its target, so a multi-waypoint route can complete."""
 

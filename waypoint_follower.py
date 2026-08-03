@@ -631,13 +631,20 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
             # (#79). So arrival is decided against our own fix, and `reached()` is never
             # called — which is also the only thing that works on a bot you own, where
             # /checkpoint-reached 500s for want of a mission slug.
-            if not detour and dist < cfg.checkpoint_radius_m and (
+            #
+            # The two radii belong to different modes and must not interact.
+            # CHECKPOINT_RADIUS_M means "start asking the SERVER", so in route mode,
+            # where there is no server, gating on it silently capped LOCAL_ARRIVE_M at
+            # 20 m — while the banner above announced the larger number the operator
+            # had actually set. Measured: announced 30 m, arrived at 19.8 m (#83).
+            at_target = (dist <= cfg.local_arrive_m if local_arrival
+                         else dist < cfg.checkpoint_radius_m)
+            if not detour and at_target and (
                     local_arrival or is_mock or now - last_reach_try > cfg.checkpoint_poll_s):
                 last_reach_try = now
-                if local_arrival:
-                    ok, detail = dist <= cfg.local_arrive_m, {}
-                else:
-                    ok, detail = io.reached()
+                # In route mode the gate IS the arrival test — there is nothing else
+                # left to ask.
+                ok, detail = (True, {}) if local_arrival else io.reached()
                 if ok:
                     # Retried and swallowed: a dropped stop command must not cost us a
                     # checkpoint the server has already confirmed (#48). The next
