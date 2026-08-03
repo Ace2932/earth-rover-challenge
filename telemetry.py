@@ -17,6 +17,7 @@ class Verdict:
     abort: str = None               # non-None -> stop the run, with this reason
     no_motion: bool = False         # commanded to move, wheels say otherwise
     stale_fix: bool = False         # /data stopped updating; the position is fiction
+    no_fix: bool = False            # /data is live but has no GPS lock; same result
     warnings: list = field(default_factory=list)
 
 
@@ -28,14 +29,28 @@ def _num(data, key):
         return None
 
 
+WHEELS = 4      # the Mini+ has four; anything after them in the row is not a wheel
+
+
 def _wheel_motion(data):
-    """Any evidence of movement: reported speed, or a turning wheel."""
+    """Any evidence of movement: reported speed, or a turning wheel.
+
+    `/data`'s `rpms` rows are `[w1, w2, w3, w4, timestamp]` — the same
+    values-then-timestamp shape `accels`, `gyros` and `mags` all use. Reading the
+    whole row made every sample look like a wheel spinning at ~1.7e9 RPM, so this
+    could not return False on a real bot and the no-motion check was dead (#76).
+
+    Take the first four rather than dropping the last: a producer that omits the
+    timestamp would otherwise silently lose a wheel, which is the same class of
+    mistake in the other direction.
+    """
     speed = _num(data, "speed")
     if speed is not None and abs(speed) > 0.05:
         return True
     try:
         return any(abs(float(r)) > 1.0 for sample in data.get("rpms") or []
-                   for r in (sample if isinstance(sample, (list, tuple)) else [sample]))
+                   for r in (sample[:WHEELS] if isinstance(sample, (list, tuple))
+                             else [sample]))
     except (TypeError, ValueError):
         return False
 
@@ -85,6 +100,30 @@ class Guard:
                 span = c.gps_signal_good - c.gps_signal_poor
                 frac = (gps - c.gps_signal_poor) / span
                 v.speed_scale = c.min_speed_scale + frac * (1.0 - c.min_speed_scale)
+
+        # Is there a fix at all? With no GPS lock the bot reports latitude and
+        # longitude of 1000 and `fix_quality` 0 — observed on the bench 2026-07-30 —
+        # while /data keeps ticking. So the freshness check below stays perfectly
+        # quiet, and every bearing computed from that position is fiction: measured
+        # at a 13 267 km "distance" driven at full cruise for a whole STUCK_S (#77).
+        #
+        # `fix_quality` is not in the SDK's documented response, so its ABSENCE must
+        # never condemn a healthy bot; only an explicit 0 does. The coordinate range
+        # check needs no undocumented field and catches the sentinel on its own.
+        if _num(data, "fix_quality") == 0:
+            v.no_fix = True
+            self._once("nofix", "GPS reports no fix (fix_quality 0)", v)
+        #
+        # Only values that are PRESENT and impossible condemn the payload. A missing
+        # latitude cannot reach here from a real bot — `LiveIO.get_pose` reads it
+        # before the guard runs and a KeyError there is already handled as a failed
+        # telemetry read — so treating absence as "no fix" would only ever fire on
+        # test doubles, which is how the first version of this broke a healthy
+        # recovery test while protecting nothing.
+        lat, lon = _num(data, "latitude"), _num(data, "longitude")
+        if (lat is not None and abs(lat) > 90.0) or (lon is not None and abs(lon) > 180.0):
+            v.no_fix = True
+            self._once("nofix_range", f"position {lat}, {lon} is not on Earth", v)
 
         # Is the position fix still alive? The SDK serves /data from a value cached
         # in the browser page and updated by incoming RTM messages, so a stalled link

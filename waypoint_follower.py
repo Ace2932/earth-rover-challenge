@@ -541,14 +541,19 @@ def run(io, cfg, route_file=None, vision_fn=None, logger=None):
                 print(f"[follower] ABORT: {verdict.abort}")
                 aborted = True
                 break
-            if verdict.stale_fix:
-                # The position we would steer on is no longer real. Treat it exactly
-                # like a failed telemetry read: skip the step, let the setpoint decay
-                # to a stop, and give up deliberately if it never recovers. Driving on
-                # a frozen fix ends in a recovery ladder planned against fiction (#59).
+            if verdict.stale_fix or verdict.no_fix:
+                # The position we would steer on is not real — either it stopped
+                # updating (#59) or there is no GPS lock behind it at all (#77).
+                # Both mean the same thing to the controller, so both get the same
+                # treatment as a failed telemetry read: skip the step, let the
+                # setpoint decay to a stop, and give up deliberately if it never
+                # recovers. Driving on either ends in a recovery ladder planned
+                # against fiction.
                 errors += 1
                 if errors >= cfg.max_consecutive_errors:
-                    print("[follower] position fix has not updated — stopping")
+                    print("[follower] no usable position fix "
+                          f"({'no GPS lock' if verdict.no_fix else 'not updating'})"
+                          " — stopping")
                     break
                 if not is_mock:
                     deadline = max(deadline + period, time.monotonic() - period)
